@@ -1,0 +1,26 @@
+{
+  "name": "opencode-fallback-bridge",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that bridges authentication between OpenCode and the opencode-fallback proxy",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "fallback",
+    "bridge"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

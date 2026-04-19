@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/matiasblanca/opencode-fallback/internal/auth"
+	"github.com/matiasblanca/opencode-fallback/internal/bridge"
 	"github.com/matiasblanca/opencode-fallback/internal/circuit"
 	"github.com/matiasblanca/opencode-fallback/internal/config"
 	"github.com/matiasblanca/opencode-fallback/internal/fallback"
@@ -74,12 +75,29 @@ func runServe(args []string) error {
 //
 // Supports subscription-based providers ("anthropic-oauth", "github-copilot")
 // that read credentials from OpenCode's auth.json via auth.Reader.
+//
+// When bridge is enabled, a bridge.Client is created and passed to providers
+// that support it (currently AnthropicOAuthProvider). The bridge is optional —
+// if the token file doesn't exist, the client reports itself as unavailable.
 func buildRegistry(cfg config.Config, logger *slog.Logger) *provider.Registry {
 	reg := provider.NewRegistry()
 
 	// Create a shared auth reader for subscription-based providers.
 	// Only created once, shared across all providers that need it.
 	var authReader *auth.Reader
+
+	// Create bridge client if enabled.
+	var bridgeClient *bridge.Client
+	if cfg.Bridge.Enabled {
+		bridgeClient = bridge.NewClientWithConfig(cfg.Bridge.Port, logger)
+		if bridgeClient.IsAvailable() {
+			logger.Info("bridge plugin is available",
+				"port", cfg.Bridge.Port,
+			)
+		} else {
+			logger.Debug("bridge plugin not available (will use local transformations)")
+		}
+	}
 
 	for name, pcfg := range cfg.Providers {
 		providerType := pcfg.Type
@@ -102,7 +120,7 @@ func buildRegistry(cfg config.Config, logger *slog.Logger) *provider.Registry {
 			if authReader == nil {
 				authReader = auth.NewReader(logger)
 			}
-			p := provider.NewAnthropicOAuthProvider(authReader, logger)
+			p := provider.NewAnthropicOAuthProvider(authReader, bridgeClient, logger)
 			if p.IsAvailable() {
 				reg.Register(p)
 				logger.Info("registered subscription provider",

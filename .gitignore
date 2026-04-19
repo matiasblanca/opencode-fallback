@@ -3,6 +3,9 @@ dist/
 /opencode-fallback
 /opencode-fallback.exe
 
+# Node.js (plugin)
+node_modules/
+
 # Go
 vendor/
 *.test

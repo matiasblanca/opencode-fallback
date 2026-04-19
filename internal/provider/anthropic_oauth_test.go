@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/matiasblanca/opencode-fallback/internal/auth"
+	"github.com/matiasblanca/opencode-fallback/internal/bridge"
 )
 
 func testLogger() *slog.Logger {
@@ -34,7 +35,7 @@ func TestAnthropicOAuth_ID(t *testing.T) {
 	dir := t.TempDir()
 	authFile := writeAuthFile(t, dir, map[string]interface{}{})
 	reader := auth.NewReaderWithPath(authFile, testLogger())
-	p := NewAnthropicOAuthProvider(reader, testLogger())
+	p := NewAnthropicOAuthProvider(reader, nil, testLogger())
 
 	if p.ID() != "anthropic-oauth" {
 		t.Errorf("ID() = %q, want %q", p.ID(), "anthropic-oauth")
@@ -81,7 +82,7 @@ func TestAnthropicOAuth_IsAvailable(t *testing.T) {
 			dir := t.TempDir()
 			authFile := writeAuthFile(t, dir, tt.content)
 			reader := auth.NewReaderWithPath(authFile, testLogger())
-			p := NewAnthropicOAuthProvider(reader, testLogger())
+			p := NewAnthropicOAuthProvider(reader, nil, testLogger())
 
 			if got := p.IsAvailable(); got != tt.want {
 				t.Errorf("IsAvailable() = %v, want %v", got, tt.want)
@@ -94,7 +95,7 @@ func TestAnthropicOAuth_SupportsModel(t *testing.T) {
 	dir := t.TempDir()
 	authFile := writeAuthFile(t, dir, map[string]interface{}{})
 	reader := auth.NewReaderWithPath(authFile, testLogger())
-	p := NewAnthropicOAuthProvider(reader, testLogger())
+	p := NewAnthropicOAuthProvider(reader, nil, testLogger())
 
 	tests := []struct {
 		model string
@@ -148,7 +149,7 @@ func TestAnthropicOAuth_Headers(t *testing.T) {
 	})
 
 	reader := auth.NewReaderWithPath(authFile, testLogger())
-	p := NewAnthropicOAuthProvider(reader, testLogger())
+	p := NewAnthropicOAuthProvider(reader, nil, testLogger())
 
 	// Override the base URL to point to our test server.
 	// We need to create a request and call send, but the provider uses a
@@ -211,7 +212,7 @@ func TestAnthropicOAuth_ClassifyError(t *testing.T) {
 	dir := t.TempDir()
 	authFile := writeAuthFile(t, dir, map[string]interface{}{})
 	reader := auth.NewReaderWithPath(authFile, testLogger())
-	p := NewAnthropicOAuthProvider(reader, testLogger())
+	p := NewAnthropicOAuthProvider(reader, nil, testLogger())
 
 	tests := []struct {
 		status    int
@@ -232,5 +233,129 @@ func TestAnthropicOAuth_ClassifyError(t *testing.T) {
 		if result.Reason != tt.wantReson {
 			t.Errorf("ClassifyError(%d).Reason = %q, want %q", tt.status, result.Reason, tt.wantReson)
 		}
+	}
+}
+
+// ─── Bridge Integration Tests ─────────────────────────────────────────
+
+func TestAnthropicOAuth_WorksWithoutBridge(t *testing.T) {
+	dir := t.TempDir()
+	authFile := writeAuthFile(t, dir, map[string]interface{}{
+		"anthropic": map[string]interface{}{
+			"type":    "oauth",
+			"refresh": "r",
+			"access":  "a",
+			"expires": 0,
+		},
+	})
+
+	reader := auth.NewReaderWithPath(authFile, testLogger())
+
+	// Create provider WITHOUT bridge (nil).
+	p := NewAnthropicOAuthProvider(reader, nil, testLogger())
+
+	// Should still be available — bridge is optional.
+	if !p.IsAvailable() {
+		t.Error("expected provider to be available without bridge")
+	}
+
+	// Verify bridge field is nil.
+	if p.bridge != nil {
+		t.Error("expected bridge to be nil when not provided")
+	}
+}
+
+func TestAnthropicOAuth_WorksWithBridgeUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	authFile := writeAuthFile(t, dir, map[string]interface{}{
+		"anthropic": map[string]interface{}{
+			"type":    "oauth",
+			"refresh": "r",
+			"access":  "a",
+			"expires": 0,
+		},
+	})
+
+	reader := auth.NewReaderWithPath(authFile, testLogger())
+
+	// Create a bridge client that points to a non-existent server.
+	dataDir := t.TempDir()
+	t.Setenv("OPENCODE_DATA_DIR", dataDir)
+	bridgeClient := bridge.NewClientWithConfig(19999, testLogger())
+
+	// Create provider with unavailable bridge.
+	p := NewAnthropicOAuthProvider(reader, bridgeClient, testLogger())
+
+	// Should still be available — bridge unavailability doesn't affect provider.
+	if !p.IsAvailable() {
+		t.Error("expected provider to be available even with unavailable bridge")
+	}
+
+	// Bridge should report as unavailable (no token file).
+	if bridgeClient.IsAvailable() {
+		t.Error("expected bridge to be unavailable (no token file)")
+	}
+}
+
+func TestAnthropicOAuth_BridgePreferred(t *testing.T) {
+	// Verify that when bridge is available, it receives the transform call.
+	bridgeCalled := false
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/transform/anthropic":
+			bridgeCalled = true
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"body":    `{"transformed":true}`,
+				"headers": map[string]string{"authorization": "Bearer fresh"},
+				"url":     "https://api.anthropic.com/v1/messages?beta=true",
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer bridgeServer.Close()
+
+	// Create a bridge client pointing to our mock.
+	bridgeClient := bridge.NewTestClient(bridgeServer.URL, "test-bridge-token", testLogger())
+
+	// Verify bridge is available.
+	if !bridgeClient.IsAvailable() {
+		t.Fatal("expected mock bridge to be available")
+	}
+
+	// Create provider with bridge. We won't call Send() because that
+	// would require a full Anthropic mock, but we verify the bridge
+	// client is configured correctly.
+	dir := t.TempDir()
+	authFile := writeAuthFile(t, dir, map[string]interface{}{
+		"anthropic": map[string]interface{}{
+			"type":    "oauth",
+			"refresh": "r",
+			"access":  "a",
+			"expires": 9999999999999,
+		},
+	})
+	reader := auth.NewReaderWithPath(authFile, testLogger())
+	p := NewAnthropicOAuthProvider(reader, bridgeClient, testLogger())
+
+	if p.bridge == nil {
+		t.Fatal("expected bridge to be set")
+	}
+	if !p.bridge.IsAvailable() {
+		t.Error("expected bridge to be available in provider")
+	}
+
+	// Call TransformAnthropic directly on the bridge to verify integration.
+	result, err := p.bridge.TransformAnthropic(`{"messages":[{"role":"user","content":"test"}]}`)
+	if err != nil {
+		t.Fatalf("bridge transform error: %v", err)
+	}
+	if !bridgeCalled {
+		t.Error("expected bridge to receive transform call")
+	}
+	if result.URL != "https://api.anthropic.com/v1/messages?beta=true" {
+		t.Errorf("bridge url = %q, want Anthropic URL", result.URL)
 	}
 }

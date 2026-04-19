@@ -28,6 +28,21 @@ type Config struct {
 	CircuitBreaker CircuitBreakerConfig      `json:"circuit_breaker"`
 	Timeouts       TimeoutConfig             `json:"timeouts"`
 	StreamRecovery StreamRecoveryConfig      `json:"stream_recovery"`
+	Bridge         BridgeConfig              `json:"bridge"`
+}
+
+// BridgeConfig holds settings for the plugin bridge connection.
+// The bridge is an OpenCode plugin that exposes a local HTTP endpoint for
+// auth token retrieval and request transformation. When enabled, the proxy
+// delegates Claude Code impersonation to the plugin instead of using its
+// own Go-based implementation.
+type BridgeConfig struct {
+	// Enabled controls whether the proxy tries to use the bridge.
+	// Default: true. When true, the proxy checks for the bridge on startup
+	// but falls back to Go implementation if the bridge is not running.
+	Enabled bool `json:"enabled"`
+	// Port is the port the bridge plugin listens on. Default: 18787.
+	Port int `json:"port"`
 }
 
 // ProxyConfig holds settings for the HTTP proxy server.

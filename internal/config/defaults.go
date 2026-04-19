@@ -31,5 +31,9 @@ func DefaultConfig() Config {
 			Enabled:            true,
 			ContinuationPrompt: "Continue exactly from where you left off. Do not repeat any content.",
 		},
+		Bridge: BridgeConfig{
+			Enabled: true,
+			Port:    18787,
+		},
 	}
 }
