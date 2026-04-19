@@ -22,6 +22,8 @@ func Run(args []string, version string) error {
 		return runRun(args[1:])
 	case "setup":
 		return runSetup(args[1:])
+	case "configure":
+		return runConfigure(args[1:])
 	case "version", "--version", "-v":
 		return runVersion(version)
 	case "help", "--help", "-h":

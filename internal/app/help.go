@@ -13,6 +13,7 @@ Commands:
   serve       Start the proxy in standalone mode (default port: 8787)
   run         Start the proxy and launch a subprocess (e.g., opencode)
   setup       Configure opencode.json to use the proxy
+  configure   Open the TUI to configure fallback chains
   version     Print version and exit
   help        Show this help message
 

@@ -9,6 +9,7 @@ Soporta **cualquier proveedor OpenAI-compatible** (OpenAI, Mistral, DeepSeek, Op
 ```bash
 go install github.com/matiasblanca/opencode-fallback/cmd/opencode-fallback@latest
 opencode-fallback setup
+opencode-fallback configure   # TUI visual para configurar cadenas de fallback
 opencode-fallback serve
 ```
 
@@ -224,6 +225,27 @@ Cualquier API OpenAI-compatible funciona con solo config — sin código nuevo:
 | `auth_type` | No | `"bearer"` | `"bearer"` o `"none"` (para Ollama) |
 | `models` | No | `[]` | Lista de modelos soportados |
 
+### TUI Configurator (v0.3)
+
+Configurá todo visualmente sin editar JSON:
+
+```bash
+opencode-fallback configure
+```
+
+La TUI lee tus agentes de `opencode.json` y te permite:
+
+- **Ver todos tus agentes** con su modelo actual y cadena de fallback
+- **Editar la cadena global** (4 slots: primario + 3 fallbacks)
+- **Crear overrides por agente** — cadenas custom para agentes específicos
+- **Agregar agentes manualmente** con la tecla `n`
+- **Buscar modelos** con filtro fuzzy, agrupados por proveedor
+- **Ver providers detectados** con estado available/offline
+
+Navegación: `j/k` para mover, `Enter` para editar, `Tab` para cambiar de tab, `Ctrl+S` para guardar, `?` para help contextual.
+
+Funciona con 60+ agentes gracias a scroll con paginación y layout responsive.
+
 ### Cadenas de fallback
 
 Las cadenas se resuelven con una cascada de 3 niveles — lo más específico gana:
@@ -286,13 +308,29 @@ Cada proveedor tiene su propio circuit breaker:
 ## Desarrollo
 
 ```bash
-go test ./...          # 182 tests
+go test ./...          # 280 tests
 go test -cover ./...   # Tests con coverage
 go vet ./...           # Verificar código
 go build ./...         # Compilar
 ```
 
 ## Changelog
+
+### v0.3.0
+
+- **TUI Configurator**: interfaz visual con Bubbletea v2 para configurar cadenas de fallback
+- **2 tabs**: Global (cadena por defecto) y Agents (lista de agentes desde opencode.json)
+- **Chain editor**: 4 slots por agente, model picker con filtro fuzzy agrupado por proveedor
+- **Agregar agentes manualmente** con la tecla `n`
+- **Colores por proveedor**: identidad visual (Anthropic amber, OpenAI green, DeepSeek blue, etc.)
+- **Provider status en slots**: `[available]`/`[offline]`/`[unknown]` al lado de cada modelo
+- **Responsive layout**: 3 breakpoints, funciona en terminales de 50 a 200+ columnas
+- **Paginación con scroll**: soporta 60+ agentes sin perder performance
+- **Help contextual**: muestra solo las teclas relevantes para la pantalla actual
+- **Model picker mejorado**: j/k filtran en vez de navegar (patrón fzf), flechas para navegar
+- **Persistencia**: `Ctrl+S` guarda, `[unsaved]` indicator, confirmación al salir con cambios
+- **Arquitectura limpia**: tui/ no importa proxy/, circuit/, fallback/ — DI estricta via Dependencies
+- **+98 tests** (182 → 280)
 
 ### v0.2.0
 
