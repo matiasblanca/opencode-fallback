@@ -8,6 +8,7 @@ const (
 	ScreenChainEditor               // Editing 4 slots of an agent
 	ScreenModelPicker               // Modal: selecting provider/model
 	ScreenProviders                  // Viewing detected providers
+	ScreenStatus                     // System status: bridge + auth
 )
 
 // Route defines forward/backward navigation for a screen.
@@ -21,6 +22,7 @@ var linearRoutes = map[Screen]Route{
 	ScreenChainEditor: {Backward: ScreenMain},
 	ScreenModelPicker: {Backward: ScreenChainEditor},
 	ScreenProviders:   {Backward: ScreenMain},
+	ScreenStatus:      {Backward: ScreenMain},
 }
 
 // backScreen returns the screen to navigate to when going backward.

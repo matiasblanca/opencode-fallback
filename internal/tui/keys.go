@@ -18,6 +18,8 @@ const (
 	keyO          = "o"
 	keyN          = "n"
 	keyP          = "p"
+	keyS          = "s"
+	keyR          = "r"
 	keyHelp       = "?"
 	keyCtrlS      = "ctrl+s"
 	keyY          = "y"

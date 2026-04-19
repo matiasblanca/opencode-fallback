@@ -29,6 +29,27 @@ type AgentDisplay struct {
 	Chain        []config.ChainEntry
 }
 
+// StatusInfo holds status information for the status screen.
+// Mirrors tui.StatusInfo to avoid circular imports.
+type StatusInfo struct {
+	Bridge    BridgeStatus
+	Providers []ProviderAuthStatus
+}
+
+// BridgeStatus represents the bridge plugin connection state.
+type BridgeStatus struct {
+	Available bool
+	Port      int
+}
+
+// ProviderAuthStatus represents the auth status for a subscription provider.
+type ProviderAuthStatus struct {
+	ProviderID string
+	AuthType   string
+	Valid      bool
+	ExpiresIn  string
+}
+
 // RenderHeader renders the top section with title, tabs, and unsaved indicator.
 func RenderHeader(activeTab int, dirty bool, statusMsg string, width int) string {
 	title := styles.Title.Render(" opencode-fallback configure ")
@@ -86,9 +107,9 @@ func RenderFooter(screen int, activeTab int, width int, scrollInfo ...string) st
 	// screen 0 = ScreenMain
 	if screen == 0 {
 		if activeTab == 0 {
-			hints = "j/k: navigate  Enter: edit slot  x: clear slot  Ctrl+S: save  ?: help  q: quit"
+			hints = "j/k: navigate  Enter: edit slot  x: clear slot  s: status  Ctrl+S: save  ?: help  q: quit"
 		} else {
-			hints = "j/k: navigate  Enter: edit  n: add agent  p: providers  ?: help  q: quit"
+			hints = "j/k: navigate  Enter: edit  n: add agent  p: providers  s: status  ?: help  q: quit"
 		}
 	}
 
@@ -116,6 +137,7 @@ const (
 	HelpScreenChainEditor = 1
 	HelpScreenModelPicker = 2
 	HelpScreenProviders   = 3
+	HelpScreenStatus      = 4
 )
 
 // RenderHelp renders the contextual help overlay.
@@ -137,6 +159,7 @@ func RenderHelp(screen int, activeTab int, width int, height int) string {
 			b.WriteString("  x           Clear slot\n")
 			b.WriteString("  Ctrl+S      Save configuration\n")
 			b.WriteString("  p           View providers\n")
+			b.WriteString("  s           System status\n")
 			b.WriteString("  ?           Toggle help\n")
 			b.WriteString("  q           Quit\n")
 		} else {
@@ -150,6 +173,7 @@ func RenderHelp(screen int, activeTab int, width int, height int) string {
 			b.WriteString("  n           Add agent\n")
 			b.WriteString("  Ctrl+S      Save configuration\n")
 			b.WriteString("  p           View providers\n")
+			b.WriteString("  s           System status\n")
 			b.WriteString("  ?           Toggle help\n")
 			b.WriteString("  q           Quit\n")
 		}
@@ -179,6 +203,11 @@ func RenderHelp(screen int, activeTab int, width int, height int) string {
 		b.WriteString("  j/k, ↑/↓    Move cursor\n")
 		b.WriteString("  Esc         Go back\n")
 		b.WriteString("  q           Quit\n")
+
+	case HelpScreenStatus:
+		b.WriteString("Actions:\n")
+		b.WriteString("  r           Refresh status\n")
+		b.WriteString("  Esc         Go back\n")
 	}
 
 	b.WriteString("\n" + styles.Subtle.Render("Press any key to close"))

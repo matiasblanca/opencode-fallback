@@ -24,6 +24,11 @@ type Dependencies struct {
 	// DiscoverAgents reads the opencode.json and returns all agents found.
 	// Returns nil/empty if the file doesn't exist (not an error).
 	DiscoverAgents func(opencodePath string) []opencode.AgentInfo
+
+	// GetStatus returns real-time auth and bridge status information.
+	// Called on demand (not polled) — the TUI refreshes when the user navigates
+	// to the status screen or presses 'r' to refresh.
+	GetStatus func() StatusInfo
 }
 
 // ProviderInfo holds display information about a provider.
@@ -42,4 +47,24 @@ type AgentDisplay struct {
 	Mode         string             // "primary" / "subagent" / ""
 	HasOverride  bool               // true if has custom chain in config.agents
 	Chain        []config.ChainEntry // Resolved fallback chain (from cascade)
+}
+
+// StatusInfo holds real-time status information for the TUI status bar.
+type StatusInfo struct {
+	Bridge    BridgeStatus
+	Providers []ProviderAuthStatus
+}
+
+// BridgeStatus represents the bridge plugin connection state.
+type BridgeStatus struct {
+	Available bool // Whether the bridge HTTP server is responding
+	Port      int  // Configured bridge port
+}
+
+// ProviderAuthStatus represents the auth status for a subscription provider.
+type ProviderAuthStatus struct {
+	ProviderID string // e.g. "anthropic", "github-copilot"
+	AuthType   string // "oauth", "api", or "none"
+	Valid      bool   // Token is present and not expired
+	ExpiresIn  string // Human-readable time until expiry (e.g. "2h 15m", "never", "expired")
 }

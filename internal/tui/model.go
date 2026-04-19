@@ -55,6 +55,9 @@ type Model struct {
 	AddingAgent  bool
 	AddAgentInput string
 
+	// Status data (fetched on demand)
+	Status StatusInfo
+
 	// DI
 	Deps Dependencies
 }
@@ -70,6 +73,7 @@ func NewModel(cfg config.Config, providers []ProviderInfo, agents []opencode.Age
 		Deps:      deps,
 	}
 	m.rebuildAgents(agents)
+	m.refreshStatus()
 	return m
 }
 
@@ -217,6 +221,8 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleModelPicker(key, msg)
 	case ScreenProviders:
 		return m.handleProviders(key)
+	case ScreenStatus:
+		return m.handleStatus(key)
 	}
 
 	return m, nil
@@ -301,6 +307,11 @@ func (m Model) handleMainScreen(key string) (tea.Model, tea.Cmd) {
 
 	case keyP:
 		m.setScreen(ScreenProviders)
+		return m, nil
+
+	case keyS:
+		m.refreshStatus()
+		m.setScreen(ScreenStatus)
 		return m, nil
 	}
 
@@ -520,6 +531,18 @@ func (m Model) handleProviders(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleStatus handles keys on the status screen.
+func (m Model) handleStatus(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case keyEsc, keyQuit:
+		m.refreshStatus()
+		m.setScreen(ScreenMain)
+	case keyR:
+		m.refreshStatus()
+	}
+	return m, nil
+}
+
 // filteredModels returns all models matching the current filter.
 func (m *Model) filteredModels() []string {
 	all := m.allModels()
@@ -694,6 +717,13 @@ func (m *Model) createOverride(agentName string) {
 	m.refreshAgentChains()
 }
 
+// refreshStatus fetches fresh status data via Dependencies.
+func (m *Model) refreshStatus() {
+	if m.Deps.GetStatus != nil {
+		m.Status = m.Deps.GetStatus()
+	}
+}
+
 // refreshAgentChains updates the resolved chains for all agents.
 func (m *Model) refreshAgentChains() {
 	for i := range m.Agents {
@@ -722,6 +752,8 @@ func (m Model) View() tea.View {
 			content = m.renderModelPicker()
 		case ScreenProviders:
 			content = m.renderProviders()
+		case ScreenStatus:
+			content = m.renderStatus()
 		}
 	}
 
@@ -750,6 +782,8 @@ func (m Model) viewContent() string {
 		return m.renderModelPicker()
 	case ScreenProviders:
 		return m.renderProviders()
+	case ScreenStatus:
+		return m.renderStatus()
 	}
 	return ""
 }
@@ -779,7 +813,15 @@ func (m Model) renderMain() string {
 		}
 	}
 	footer := screens.RenderFooter(int(m.Screen), m.ActiveTab, m.Width, scrollInfo)
-	return header + "\n" + content + "\n" + footer
+
+	// Status bar at the bottom of the main screen.
+	statusBar := screens.RenderStatusBar(m.toScreenStatus(), m.Width, m.Height)
+
+	result := header + "\n" + content + "\n" + footer
+	if statusBar != "" {
+		result += "\n" + statusBar
+	}
+	return result
 }
 
 // renderChainEditor renders the chain editor for the current agent.
@@ -822,6 +864,11 @@ func (m Model) renderProviders() string {
 	return screens.RenderProviders(m.toScreenProviders(), m.Cursor, m.Width)
 }
 
+// renderStatus renders the system status screen.
+func (m Model) renderStatus() string {
+	return screens.RenderStatus(m.toScreenStatus(), m.Width)
+}
+
 // toScreenProviders converts tui.ProviderInfo to screens.ProviderInfo.
 func (m Model) toScreenProviders() []screens.ProviderInfo {
 	sp := make([]screens.ProviderInfo, len(m.Providers))
@@ -835,6 +882,26 @@ func (m Model) toScreenProviders() []screens.ProviderInfo {
 		}
 	}
 	return sp
+}
+
+// toScreenStatus converts tui.StatusInfo to screens.StatusInfo.
+func (m Model) toScreenStatus() screens.StatusInfo {
+	sp := make([]screens.ProviderAuthStatus, len(m.Status.Providers))
+	for i, p := range m.Status.Providers {
+		sp[i] = screens.ProviderAuthStatus{
+			ProviderID: p.ProviderID,
+			AuthType:   p.AuthType,
+			Valid:      p.Valid,
+			ExpiresIn:  p.ExpiresIn,
+		}
+	}
+	return screens.StatusInfo{
+		Bridge: screens.BridgeStatus{
+			Available: m.Status.Bridge.Available,
+			Port:      m.Status.Bridge.Port,
+		},
+		Providers: sp,
+	}
 }
 
 // toScreenAgents converts tui.AgentDisplay to screens.AgentDisplay.
