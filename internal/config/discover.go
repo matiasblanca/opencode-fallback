@@ -41,9 +41,23 @@ var ollamaModels = []string{
 	"gemma2",
 }
 
+// mistralModels is the list of standard Mistral models added when the
+// MISTRAL_API_KEY environment variable is present.
+var mistralModels = []string{
+	"mistral-large-latest",
+	"codestral-latest",
+}
+
+// geminiModels is the list of standard Gemini models added when the
+// GEMINI_API_KEY environment variable is present.
+var geminiModels = []string{
+	"gemini-2.5-pro",
+	"gemini-2.5-flash",
+}
+
 // providerOrder defines the precedence order for the global fallback chain.
 // Providers detected later in this list are added after earlier ones.
-var providerOrder = []string{"anthropic", "openai", "deepseek", "ollama"}
+var providerOrder = []string{"anthropic", "openai", "deepseek", "mistral", "gemini", "openrouter", "ollama"}
 
 // DetectAvailableProviders auto-detects LLM providers from the environment.
 //
@@ -84,11 +98,39 @@ func DetectAvailableProviders() (providers map[string]ProviderConfig, chain []Ch
 		}
 	}
 
+	// Mistral
+	if key := os.Getenv("MISTRAL_API_KEY"); key != "" {
+		providers["mistral"] = ProviderConfig{
+			BaseURL: "https://api.mistral.ai",
+			APIKey:  key,
+			Models:  mistralModels,
+		}
+	}
+
+	// Google Gemini (OpenAI-compatible endpoint)
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		providers["gemini"] = ProviderConfig{
+			BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+			APIKey:  key,
+			Models:  geminiModels,
+		}
+	}
+
+	// OpenRouter
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		providers["openrouter"] = ProviderConfig{
+			BaseURL: "https://openrouter.ai/api/v1",
+			APIKey:  key,
+			// OpenRouter accepts any model; leave Models empty.
+		}
+	}
+
 	// Ollama — probe via HTTP
 	if probeOllama() {
 		providers["ollama"] = ProviderConfig{
-			BaseURL: "http://localhost:11434",
-			Models:  ollamaModels,
+			BaseURL:  "http://localhost:11434",
+			AuthType: "none",
+			Models:   ollamaModels,
 		}
 	}
 

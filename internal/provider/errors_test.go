@@ -228,6 +228,119 @@ func TestClassifyOpenAIError(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// ClassifyGenericOpenAIError
+// --------------------------------------------------------------------------
+
+func TestClassifyGenericOpenAIError(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		headers    http.Header
+		body       []byte
+		wantType   ErrorType
+		wantReason string
+	}{
+		{
+			name:       "429 rate limit",
+			status:     429,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorRetriable,
+			wantReason: "rate_limit",
+		},
+		{
+			name:   "429 tokens exhausted",
+			status: 429,
+			headers: http.Header{
+				"X-Ratelimit-Remaining-Tokens": []string{"0"},
+			},
+			body:       nil,
+			wantType:   ErrorRetriable,
+			wantReason: "rate_limit_tokens_exhausted",
+		},
+		{
+			name:       "529 overloaded",
+			status:     529,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorRetriable,
+			wantReason: "overloaded",
+		},
+		{
+			name:       "401 auth",
+			status:     401,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorFatal,
+			wantReason: "auth",
+		},
+		{
+			name:       "403 forbidden",
+			status:     403,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorFatal,
+			wantReason: "auth",
+		},
+		{
+			name:       "404 not found",
+			status:     404,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorFatal,
+			wantReason: "model_not_found",
+		},
+		{
+			name:       "500 server error",
+			status:     500,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorRetriable,
+			wantReason: "server_error",
+		},
+		{
+			name:       "503 service unavailable",
+			status:     503,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorRetriable,
+			wantReason: "server_error",
+		},
+		{
+			name:       "400 bad request",
+			status:     400,
+			headers:    http.Header{},
+			body:       nil,
+			wantType:   ErrorFatal,
+			wantReason: "client_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyGenericOpenAIError(tt.status, tt.headers, tt.body)
+			if got.Type != tt.wantType {
+				t.Errorf("Type = %v, want %v", got.Type, tt.wantType)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+			if got.StatusCode != tt.status {
+				t.Errorf("StatusCode = %d, want %d", got.StatusCode, tt.status)
+			}
+		})
+	}
+}
+
+func TestClassifyGenericOpenAIError_RetryAfter(t *testing.T) {
+	headers := http.Header{"Retry-After": []string{"60"}}
+	got := ClassifyGenericOpenAIError(429, headers, nil)
+	if got.RetryAfter != 60*time.Second {
+		t.Errorf("RetryAfter = %v, want 60s", got.RetryAfter)
+	}
+}
+
+// --------------------------------------------------------------------------
 // ClassifyDeepSeekError
 // --------------------------------------------------------------------------
 

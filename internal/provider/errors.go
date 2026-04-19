@@ -111,13 +111,28 @@ func ClassifyAnthropicError(status int, headers http.Header, body []byte) ErrorC
 // --------------------------------------------------------------------------
 
 // ClassifyOpenAIError classifies an HTTP error response from the OpenAI API.
+// This is now a thin wrapper over ClassifyGenericOpenAIError, kept for
+// backward compatibility.
+func ClassifyOpenAIError(status int, headers http.Header, body []byte) ErrorClassification {
+	return ClassifyGenericOpenAIError(status, headers, body)
+}
+
+// --------------------------------------------------------------------------
+// Generic OpenAI-compatible error classification
+// --------------------------------------------------------------------------
+
+// ClassifyGenericOpenAIError classifies an HTTP error response from any
+// OpenAI-compatible API. This is the default classifier for
+// GenericOpenAIProvider.
 //
-// Classification rules (from architecture doc §7.1):
+// Classification rules:
 //   - 429: retriable (rate limit); checks X-Ratelimit-Remaining-Tokens header
-//   - 401: fatal (auth)
+//   - 529: retriable (overloaded) — Anthropic-specific but harmless for others
+//   - 401/403: fatal (auth)
+//   - 404: fatal (model_not_found)
 //   - 500+: retriable (server error)
 //   - other 4xx: fatal (client error)
-func ClassifyOpenAIError(status int, headers http.Header, body []byte) ErrorClassification {
+func ClassifyGenericOpenAIError(status int, headers http.Header, body []byte) ErrorClassification {
 	switch {
 	case status == 429:
 		reason := "rate_limit"
@@ -127,12 +142,25 @@ func ClassifyOpenAIError(status int, headers http.Header, body []byte) ErrorClas
 		return ErrorClassification{
 			Type:       ErrorRetriable,
 			Reason:     reason,
+			RetryAfter: parseRetryAfter(headers.Get("Retry-After")),
 			StatusCode: status,
 		}
-	case status == 401:
+	case status == 529:
+		return ErrorClassification{
+			Type:       ErrorRetriable,
+			Reason:     "overloaded",
+			StatusCode: status,
+		}
+	case status == 401 || status == 403:
 		return ErrorClassification{
 			Type:       ErrorFatal,
 			Reason:     "auth",
+			StatusCode: status,
+		}
+	case status == 404:
+		return ErrorClassification{
+			Type:       ErrorFatal,
+			Reason:     "model_not_found",
 			StatusCode: status,
 		}
 	case status >= 500:
@@ -155,41 +183,10 @@ func ClassifyOpenAIError(status int, headers http.Header, body []byte) ErrorClas
 // --------------------------------------------------------------------------
 
 // ClassifyDeepSeekError classifies an HTTP error response from the DeepSeek
-// API. DeepSeek uses the OpenAI-compatible format so the classification is
-// similar.
-//
-// Classification rules (from architecture doc §7.1):
-//   - 429: retriable (rate limit)
-//   - 401: fatal (auth)
-//   - 500+: retriable (server error)
-//   - other 4xx: fatal (client error)
+// API. DeepSeek uses an OpenAI-compatible format, so this is an alias for
+// ClassifyGenericOpenAIError. Kept for backward compatibility.
 func ClassifyDeepSeekError(status int, headers http.Header, body []byte) ErrorClassification {
-	switch {
-	case status == 429:
-		return ErrorClassification{
-			Type:       ErrorRetriable,
-			Reason:     "rate_limit",
-			StatusCode: status,
-		}
-	case status == 401:
-		return ErrorClassification{
-			Type:       ErrorFatal,
-			Reason:     "auth",
-			StatusCode: status,
-		}
-	case status >= 500:
-		return ErrorClassification{
-			Type:       ErrorRetriable,
-			Reason:     "server_error",
-			StatusCode: status,
-		}
-	default:
-		return ErrorClassification{
-			Type:       ErrorFatal,
-			Reason:     "client_error",
-			StatusCode: status,
-		}
-	}
+	return ClassifyGenericOpenAIError(status, headers, body)
 }
 
 // --------------------------------------------------------------------------

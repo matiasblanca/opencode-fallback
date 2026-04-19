@@ -67,30 +67,41 @@ func runServe(args []string) error {
 }
 
 // buildRegistry creates a provider registry from the config, registering
-// all configured providers.
+// all configured providers. Provider type is determined by pcfg.Type; if
+// empty, it is inferred from the provider name ("anthropic" → "anthropic",
+// everything else → "openai-compatible").
 func buildRegistry(cfg config.Config, logger *slog.Logger) *provider.Registry {
 	reg := provider.NewRegistry()
 
 	for name, pcfg := range cfg.Providers {
-		switch name {
+		providerType := pcfg.Type
+		if providerType == "" {
+			if name == "anthropic" {
+				providerType = "anthropic"
+			} else {
+				providerType = "openai-compatible"
+			}
+		}
+
+		switch providerType {
 		case "anthropic":
 			p := provider.NewAnthropicProvider(pcfg.BaseURL, pcfg.APIKey, pcfg.Models, logger)
 			if p.IsAvailable() {
 				reg.Register(p)
 			}
-		case "openai":
-			p := provider.NewOpenAIProvider(pcfg.BaseURL, pcfg.APIKey, pcfg.Models, logger)
+		default: // "openai-compatible", "gemini", or any future type
+			authType := provider.AuthTypeBearer
+			if pcfg.AuthType == "none" {
+				authType = provider.AuthTypeNone
+			}
+			displayName := pcfg.DisplayName
+			if displayName == "" {
+				displayName = name
+			}
+			p := provider.NewGenericOpenAIProvider(name, displayName, pcfg.BaseURL, pcfg.APIKey, authType, pcfg.Models, nil, logger)
 			if p.IsAvailable() {
 				reg.Register(p)
 			}
-		case "deepseek":
-			p := provider.NewDeepSeekProvider(pcfg.BaseURL, pcfg.APIKey, pcfg.Models, logger)
-			if p.IsAvailable() {
-				reg.Register(p)
-			}
-		case "ollama":
-			p := provider.NewOllamaProvider(pcfg.BaseURL, pcfg.Models, logger)
-			reg.Register(p) // Ollama is always "available" (no API key)
 		}
 	}
 

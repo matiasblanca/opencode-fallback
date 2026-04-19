@@ -39,11 +39,19 @@ type ProxyConfig struct {
 
 // ProviderConfig holds connection details for a single LLM provider.
 type ProviderConfig struct {
-	BaseURL    string   `json:"base_url,omitempty"`
-	APIKey     string   `json:"api_key,omitempty"`
-	AuthType   string   `json:"auth_type,omitempty"`
-	OAuthToken string   `json:"oauth_token,omitempty"`
-	Models     []string `json:"models,omitempty"`
+	// Type identifies the provider protocol: "openai-compatible", "anthropic".
+	// If empty, it is inferred from the provider name at buildRegistry time:
+	//   - "anthropic" → "anthropic"
+	//   - everything else → "openai-compatible"
+	Type        string   `json:"type,omitempty"`
+	// DisplayName is the human-readable name shown in logs.
+	// Defaults to the provider map key if empty.
+	DisplayName string   `json:"display_name,omitempty"`
+	BaseURL     string   `json:"base_url,omitempty"`
+	APIKey      string   `json:"api_key,omitempty"`
+	AuthType    string   `json:"auth_type,omitempty"`
+	OAuthToken  string   `json:"oauth_token,omitempty"`
+	Models      []string `json:"models,omitempty"`
 }
 
 // FallbackChainsConfig defines global and per-agent fallback chains.

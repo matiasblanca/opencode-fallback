@@ -535,6 +535,94 @@ func TestConfigDir(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────
+// TestProviderConfigTypeField — backward compat and new type field
+// ─────────────────────────────────────────────────────────
+
+func TestProviderConfigTypeField_Omitted(t *testing.T) {
+	// Old config without "type" field must deserialize without error.
+	raw := `{"base_url":"https://api.openai.com","api_key":"sk-test","models":["gpt-4o"]}`
+	var pc config.ProviderConfig
+	if err := json.Unmarshal([]byte(raw), &pc); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if pc.Type != "" {
+		t.Errorf("Type = %q, want empty (backward compat)", pc.Type)
+	}
+	if pc.BaseURL != "https://api.openai.com" {
+		t.Errorf("BaseURL = %q", pc.BaseURL)
+	}
+}
+
+func TestProviderConfigTypeField_OpenAICompatible(t *testing.T) {
+	raw := `{"type":"openai-compatible","base_url":"https://api.mistral.ai","api_key":"key","models":["mistral-large-latest"]}`
+	var pc config.ProviderConfig
+	if err := json.Unmarshal([]byte(raw), &pc); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if pc.Type != "openai-compatible" {
+		t.Errorf("Type = %q, want %q", pc.Type, "openai-compatible")
+	}
+}
+
+func TestProviderConfigTypeField_Anthropic(t *testing.T) {
+	raw := `{"type":"anthropic","base_url":"https://api.anthropic.com","api_key":"key"}`
+	var pc config.ProviderConfig
+	if err := json.Unmarshal([]byte(raw), &pc); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if pc.Type != "anthropic" {
+		t.Errorf("Type = %q, want %q", pc.Type, "anthropic")
+	}
+}
+
+func TestProviderConfigDisplayName(t *testing.T) {
+	raw := `{"display_name":"My Custom Provider","base_url":"https://x.com","api_key":"key"}`
+	var pc config.ProviderConfig
+	if err := json.Unmarshal([]byte(raw), &pc); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if pc.DisplayName != "My Custom Provider" {
+		t.Errorf("DisplayName = %q, want %q", pc.DisplayName, "My Custom Provider")
+	}
+}
+
+func TestProviderConfigRoundTrip_WithType(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("OPENCODE_FALLBACK_CONFIG_DIR", dir)
+
+	original := config.DefaultConfig()
+	original.Providers = map[string]config.ProviderConfig{
+		"mistral": {
+			Type:        "openai-compatible",
+			DisplayName: "Mistral AI",
+			BaseURL:     "https://api.mistral.ai",
+			APIKey:      "sk-mistral",
+			Models:      []string{"mistral-large-latest"},
+		},
+	}
+
+	if err := config.Save(original); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	p, ok := loaded.Providers["mistral"]
+	if !ok {
+		t.Fatal("providers[mistral] not found after round-trip")
+	}
+	if p.Type != "openai-compatible" {
+		t.Errorf("Type = %q, want %q", p.Type, "openai-compatible")
+	}
+	if p.DisplayName != "Mistral AI" {
+		t.Errorf("DisplayName = %q, want %q", p.DisplayName, "Mistral AI")
+	}
+}
+
+// ─────────────────────────────────────────────────────────
 // TestDetectAvailableProviders — env-based auto-detection
 // ─────────────────────────────────────────────────────────
 
@@ -569,6 +657,88 @@ func TestDetectAvailableProviders(t *testing.T) {
 	}
 	if chain[0].Provider != "anthropic" {
 		t.Errorf("chain[0].Provider = %q, want \"anthropic\"", chain[0].Provider)
+	}
+}
+
+func TestDetectAvailableProviders_Mistral(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("MISTRAL_API_KEY", "sk-mistral-test")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	providers, _ := config.DetectAvailableProviders()
+
+	m, ok := providers["mistral"]
+	if !ok {
+		t.Fatal("mistral not detected when MISTRAL_API_KEY is set")
+	}
+	if m.BaseURL != "https://api.mistral.ai" {
+		t.Errorf("mistral.BaseURL = %q, want %q", m.BaseURL, "https://api.mistral.ai")
+	}
+	if len(m.Models) == 0 {
+		t.Error("mistral.Models is empty")
+	}
+}
+
+func TestDetectAvailableProviders_Gemini(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "gemini-key-test")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	providers, _ := config.DetectAvailableProviders()
+
+	g, ok := providers["gemini"]
+	if !ok {
+		t.Fatal("gemini not detected when GEMINI_API_KEY is set")
+	}
+	wantURL := "https://generativelanguage.googleapis.com/v1beta/openai"
+	if g.BaseURL != wantURL {
+		t.Errorf("gemini.BaseURL = %q, want %q", g.BaseURL, wantURL)
+	}
+	if len(g.Models) == 0 {
+		t.Error("gemini.Models is empty")
+	}
+}
+
+func TestDetectAvailableProviders_OpenRouter(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-test")
+
+	providers, _ := config.DetectAvailableProviders()
+
+	or, ok := providers["openrouter"]
+	if !ok {
+		t.Fatal("openrouter not detected when OPENROUTER_API_KEY is set")
+	}
+	if or.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Errorf("openrouter.BaseURL = %q, want %q", or.BaseURL, "https://openrouter.ai/api/v1")
+	}
+}
+
+func TestDetectAvailableProviders_NotDetectedWhenEmpty(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	providers, _ := config.DetectAvailableProviders()
+
+	if _, ok := providers["mistral"]; ok {
+		t.Error("mistral should not be detected when key is empty")
+	}
+	if _, ok := providers["gemini"]; ok {
+		t.Error("gemini should not be detected when key is empty")
+	}
+	if _, ok := providers["openrouter"]; ok {
+		t.Error("openrouter should not be detected when key is empty")
 	}
 }
 
