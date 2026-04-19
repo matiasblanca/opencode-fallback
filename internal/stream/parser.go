@@ -26,6 +26,11 @@ type SSEEvent struct {
 	Raw string
 }
 
+// DataTransformFunc is an optional function applied to each SSE data field
+// before the event is returned to the caller. Used by OAuth providers to
+// strip tool name prefixes from response streams.
+type DataTransformFunc func(data string) string
+
 // SSEParser reads a streaming HTTP response and emits SSEEvent structs one
 // by one. It handles both OpenAI format (data-only lines) and Anthropic
 // format (event + data lines).
@@ -33,8 +38,9 @@ type SSEEvent struct {
 // This parser does NOT import provider/ or fallback/ — it operates purely
 // on the SSE wire format.
 type SSEParser struct {
-	scanner *bufio.Scanner
-	reader  io.ReadCloser
+	scanner   *bufio.Scanner
+	reader    io.ReadCloser
+	transform DataTransformFunc
 }
 
 // NewSSEParser creates a parser that reads SSE events from the given reader.
@@ -43,6 +49,17 @@ func NewSSEParser(reader io.ReadCloser) *SSEParser {
 	return &SSEParser{
 		scanner: bufio.NewScanner(reader),
 		reader:  reader,
+	}
+}
+
+// NewSSEParserWithTransform creates a parser with a data transformation
+// function that is applied to each SSE data field before the event is
+// returned. This is used by OAuth providers to strip tool name prefixes.
+func NewSSEParserWithTransform(reader io.ReadCloser, fn DataTransformFunc) *SSEParser {
+	return &SSEParser{
+		scanner:   bufio.NewScanner(reader),
+		reader:    reader,
+		transform: fn,
 	}
 }
 
@@ -90,6 +107,11 @@ func (p *SSEParser) Next() (SSEEvent, error) {
 // content delta from the JSON payload when possible.
 func (p *SSEParser) parseDataLine(line string, eventType string) SSEEvent {
 	data := strings.TrimPrefix(line, "data: ")
+
+	// Apply optional transform to the data.
+	if p.transform != nil {
+		data = p.transform(data)
+	}
 
 	event := SSEEvent{
 		Type: eventType,

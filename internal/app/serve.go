@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matiasblanca/opencode-fallback/internal/auth"
 	"github.com/matiasblanca/opencode-fallback/internal/circuit"
 	"github.com/matiasblanca/opencode-fallback/internal/config"
 	"github.com/matiasblanca/opencode-fallback/internal/fallback"
@@ -70,8 +71,15 @@ func runServe(args []string) error {
 // all configured providers. Provider type is determined by pcfg.Type; if
 // empty, it is inferred from the provider name ("anthropic" → "anthropic",
 // everything else → "openai-compatible").
+//
+// Supports subscription-based providers ("anthropic-oauth", "github-copilot")
+// that read credentials from OpenCode's auth.json via auth.Reader.
 func buildRegistry(cfg config.Config, logger *slog.Logger) *provider.Registry {
 	reg := provider.NewRegistry()
+
+	// Create a shared auth reader for subscription-based providers.
+	// Only created once, shared across all providers that need it.
+	var authReader *auth.Reader
 
 	for name, pcfg := range cfg.Providers {
 		providerType := pcfg.Type
@@ -89,6 +97,37 @@ func buildRegistry(cfg config.Config, logger *slog.Logger) *provider.Registry {
 			if p.IsAvailable() {
 				reg.Register(p)
 			}
+
+		case "anthropic-oauth":
+			if authReader == nil {
+				authReader = auth.NewReader(logger)
+			}
+			p := provider.NewAnthropicOAuthProvider(authReader, logger)
+			if p.IsAvailable() {
+				reg.Register(p)
+				logger.Info("registered subscription provider",
+					"provider", p.ID(),
+					"name", p.Name(),
+				)
+			} else {
+				logger.Debug("anthropic-oauth not available (no OAuth entry in auth.json)")
+			}
+
+		case "github-copilot":
+			if authReader == nil {
+				authReader = auth.NewReader(logger)
+			}
+			p := provider.NewCopilotProvider(authReader, logger)
+			if p.IsAvailable() {
+				reg.Register(p)
+				logger.Info("registered subscription provider",
+					"provider", p.ID(),
+					"name", p.Name(),
+				)
+			} else {
+				logger.Debug("github-copilot not available (no OAuth entry in auth.json)")
+			}
+
 		default: // "openai-compatible", "gemini", or any future type
 			authType := provider.AuthTypeBearer
 			if pcfg.AuthType == "none" {

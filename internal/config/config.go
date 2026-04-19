@@ -39,7 +39,8 @@ type ProxyConfig struct {
 
 // ProviderConfig holds connection details for a single LLM provider.
 type ProviderConfig struct {
-	// Type identifies the provider protocol: "openai-compatible", "anthropic".
+	// Type identifies the provider protocol: "openai-compatible", "anthropic",
+	// "anthropic-oauth", "github-copilot".
 	// If empty, it is inferred from the provider name at buildRegistry time:
 	//   - "anthropic" → "anthropic"
 	//   - everything else → "openai-compatible"
@@ -52,6 +53,9 @@ type ProviderConfig struct {
 	AuthType    string   `json:"auth_type,omitempty"`
 	OAuthToken  string   `json:"oauth_token,omitempty"`
 	Models      []string `json:"models,omitempty"`
+	// AuthSource specifies where to read credentials.
+	// "env" (default) = env vars/config, "opencode" = read from OpenCode's auth.json
+	AuthSource  string   `json:"auth_source,omitempty"`
 }
 
 // FallbackChainsConfig defines global and per-agent fallback chains.
