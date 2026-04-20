@@ -29,9 +29,12 @@ OpenCode **no tiene fallback automático** entre proveedores. Si un proveedor fa
   │         opencode-fallback                │
   │  ┌────────────────────────────────────┐  │
   │  │ Chain Selector   (agent→group→global) │
+  │  │ Health Scoring   (sort by health) │  │
   │  │ Retry + Backoff  (same provider)   │  │
   │  │ Circuit Breaker  (weighted reasons)│  │
   │  │ Rate-Limit Cooldown (Retry-After)  │  │
+  │  │ Quota Detection  (billing vs rate) │  │
+  │  │ Abort Safety     (suppress errors) │  │
   │  │ TTFT Timeout     (hung streams)    │  │
   │  │ Overflow Guard   (never fallback)  │  │
   │  │ Format Adapter   (OpenAI↔Anthropic)│  │
@@ -44,6 +47,12 @@ OpenCode **no tiene fallback automático** entre proveedores. Si un proveedor fa
 ```
 
 ## Features
+
+### Smart Selection (v0.9)
+
+- **Quota exhaustion detection** — Distingue rate limits temporales (429 → retry en segundos) de billing quota agotada (429 → proveedor muerto por horas). 10 patrones regex detectan "exceeded your current quota", "billing hard limit", "insufficient_quota", etc. Los quota exhaustion son fatales — no retry, no circuit breaker recording.
+- **Health-scored provider selection** — Antes de caminar la cadena, los proveedores se ordenan por salud: healthy (3) > half-open (2) > cooldown (1) > open/down (0). Sort estable preserva el orden configurado entre providers con igual score.
+- **Abort safety** — Cuando el usuario cancela (Ctrl+C), los errores post-abort no se registran en el circuit breaker. La cadena para inmediatamente sin intentar más providers.
 
 ### Resiliencia inteligente (v0.7–v0.8)
 
@@ -296,17 +305,20 @@ Las cadenas se resuelven con una cascada de 3 niveles — lo más específico ga
 
 1. **Request llega** al proxy en formato OpenAI-compatible
 2. **Chain Selector** elige la cadena de fallback (agente → grupo → global)
-3. **Circuit breaker check** — skip providers con circuito abierto o en cooldown
-4. **Intenta el proveedor** — envía el request
-5. **Si falla con error retriable** — reintenta el **mismo** proveedor con backoff exponencial (hasta 1 retry)
-6. **Si agota retries o error fatal** — registra el fallo y pasa al siguiente proveedor
-7. **El primero que responde** envía la respuesta de vuelta a OpenCode — transparente
+3. **Health scoring** — ordena providers por salud (healthy > half-open > cooldown > down), preservando orden configurado entre iguales
+4. **Circuit breaker check** — skip providers con circuito abierto o en cooldown
+5. **Intenta el proveedor** — envía el request
+6. **Si falla con error retriable** — reintenta el **mismo** proveedor con backoff exponencial (hasta 1 retry)
+7. **Si agota retries o error fatal** — registra el fallo y pasa al siguiente proveedor
+8. **Si el usuario aborta** — para la cadena inmediatamente sin penalizar al proveedor
+9. **El primero que responde** envía la respuesta de vuelta a OpenCode — transparente
 
 ### Clasificación de errores
 
 | HTTP Code | Significado | Retry? | Fallback? | CB Weight |
 |-----------|-------------|--------|-----------|-----------|
 | 429 | Rate limit | Sí (con Retry-After) | Sí | 1 (lento) |
+| 429 + quota body | Billing exhausted | No | Sí (skip) | 0 (fatal) |
 | 529 | Overloaded (Anthropic) | Sí | Sí | 1 (lento) |
 | 500, 502, 503 | Server error | Sí | Sí | 2 (medio) |
 | Timeout | Sin respuesta | Sí | Sí | 2 (medio) |
@@ -315,6 +327,7 @@ Las cadenas se resuelven con una cascada de 3 niveles — lo más específico ga
 | Context overflow | Prompt muy largo | No | **No** | 0 (ignorado) |
 | 401, 403 | Auth inválido | No | Sí (skip) | 0 (ignorado) |
 | 404 | Modelo no encontrado | No | Sí (skip) | 0 (ignorado) |
+| ctx.Err() | User abort (Ctrl+C) | No | **No** (stops chain) | 0 (ignorado) |
 
 ### Circuit Breaker
 
@@ -366,7 +379,7 @@ Cualquier API que acepte el formato OpenAI `/v1/chat/completions` funciona — s
 ## Desarrollo
 
 ```bash
-go test ./...          # 393 tests
+go test ./...          # 647 tests
 go test -cover ./...   # Tests con coverage
 go vet ./...           # Static analysis
 go build ./...         # Compilar todo
@@ -375,6 +388,13 @@ go build ./...         # Compilar todo
 ~7400 líneas de código de producción, ~9700 líneas de tests.
 
 ## Changelog
+
+### v0.9.0
+
+- **Quota exhaustion detection** — Distingue 429 temporales de billing quota exhausted (10 patrones). Quota exhaustion es fatal — no retry, no CB recording, skip inmediato.
+- **Health-scored provider selection** — Providers se ordenan por salud (closed=3, half-open=2, cooldown=1, open=0) antes de caminar la cadena. Sort estable preserva el orden del usuario entre providers con igual score.
+- **Abort safety** — Errores post-abort (Ctrl+C) no se registran en el circuit breaker. La cadena para inmediatamente. Reason `"aborted"` no dispara retry ni fallback.
+- **+28 tests** (393 → 421 top-level, 647 including subtests)
 
 ### v0.8.0
 
