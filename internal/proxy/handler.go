@@ -212,15 +212,19 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if p != nil {
 			available = p.IsAvailable()
 		}
-		providers = append(providers, ProviderStatus{
+		ps := ProviderStatus{
 			ID:           id,
 			CircuitState: breaker.CurrentState().String(),
 			Available:    available,
-		})
+		}
+		if remaining := breaker.CooldownRemaining(); remaining > 0 {
+			ps.CooldownUntil = time.Now().Add(remaining).UTC().Format(time.RFC3339)
+		}
+		providers = append(providers, ps)
 	}
 
 	resp := StatusResponse{
-		Version:   "0.7.0",
+		Version:   "0.8.0",
 		Uptime:    uptime.Round(time.Second).String(),
 		UptimeSec: uptime.Seconds(),
 		Providers: providers,

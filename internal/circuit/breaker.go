@@ -73,6 +73,7 @@ type CircuitBreaker struct {
 	failureCount    int
 	lastFailureTime time.Time
 	openedAt        time.Time
+	cooldownUntil   time.Time // if set, overrides openedAt + OpenDuration
 
 	// FailureThreshold is the number of failures within FailureWindow that open
 	// the circuit.
@@ -123,7 +124,14 @@ func (cb *CircuitBreaker) Allow() bool {
 		return true
 
 	case StateOpen:
-		if cb.now().Sub(cb.openedAt) >= cb.OpenDuration {
+		// Use cooldownUntil if set, otherwise fall back to openedAt + OpenDuration.
+		readyAt := cb.openedAt.Add(cb.OpenDuration)
+		if !cb.cooldownUntil.IsZero() && cb.cooldownUntil.After(readyAt) {
+			readyAt = cb.cooldownUntil
+		}
+		now := cb.now()
+		if now.After(readyAt) || now.Equal(readyAt) {
+			cb.cooldownUntil = time.Time{} // clear cooldown
 			cb.transitionTo(StateHalfOpen)
 			return true // single probe
 		}
@@ -208,6 +216,103 @@ func (cb *CircuitBreaker) Reset() {
 	defer cb.mu.Unlock()
 	cb.transitionTo(StateClosed)
 	cb.resetCounters()
+}
+
+// RecordRateLimitWithCooldown opens the circuit breaker with a specific
+// cooldown duration, typically from a Retry-After header. The circuit
+// stays open for the longer of `cooldown` or `OpenDuration`.
+//
+// This is distinct from RecordFailure because:
+//   - It opens immediately (no threshold counting)
+//   - It uses the provider's suggested cooldown instead of our default
+//   - It's a controlled cooldown, not a "something is broken" trip
+func (cb *CircuitBreaker) RecordRateLimitWithCooldown(cooldown time.Duration) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cooldown < cb.OpenDuration {
+		cooldown = cb.OpenDuration
+	}
+
+	now := cb.now()
+	cb.openedAt = now
+	cb.cooldownUntil = now.Add(cooldown)
+	cb.transitionTo(StateOpen)
+
+	cb.logger.Info("rate limit cooldown",
+		"provider", cb.providerID,
+		"cooldown", cooldown,
+	)
+}
+
+// CooldownRemaining returns the remaining cooldown duration, or 0 if
+// not in cooldown. Safe for concurrent use.
+func (cb *CircuitBreaker) CooldownRemaining() time.Duration {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.cooldownUntil.IsZero() {
+		return 0
+	}
+	remaining := cb.cooldownUntil.Sub(cb.now())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// RecordFailureWithReason records a failure with a weight based on the
+// failure reason. Rate limits (weight 1) accumulate slower than server
+// errors (weight 2) or timeouts (weight 3).
+func (cb *CircuitBreaker) RecordFailureWithReason(reason string) {
+	weight := FailureWeight(reason)
+	if weight == 0 {
+		return // fatal errors don't affect the circuit
+	}
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	now := cb.now()
+
+	switch cb.state {
+	case StateHalfOpen:
+		cb.openedAt = now
+		cb.transitionTo(StateOpen)
+		return
+
+	case StateClosed:
+		if cb.failureCount > 0 && now.Sub(cb.lastFailureTime) > cb.FailureWindow {
+			cb.resetCounters()
+		}
+
+		cb.failureCount += weight
+		cb.lastFailureTime = now
+
+		if cb.failureCount >= cb.FailureThreshold {
+			cb.openedAt = now
+			cb.transitionTo(StateOpen)
+		}
+	}
+}
+
+// FailureWeight returns how much a failure reason contributes to the
+// circuit breaker threshold. Higher weight = faster trip.
+//
+// Weight 0: doesn't count (fatal errors handled elsewhere)
+// Weight 1: rate limit (transient, self-resolving)
+// Weight 2: server error, network (persistent, worth tripping)
+// Weight 3: repeated timeout (strong signal provider is down)
+func FailureWeight(reason string) int {
+	switch reason {
+	case "rate_limit", "rate_limit_tokens_exhausted", "overloaded":
+		return 1
+	case "server_error", "network":
+		return 2
+	case "ttft_timeout":
+		return 3
+	default:
+		return 0 // fatal errors don't contribute
+	}
 }
 
 // --------------------------------------------------------------------------

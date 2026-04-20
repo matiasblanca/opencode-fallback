@@ -30,7 +30,8 @@ type FailureRecord struct {
 	ModelID    string
 	Error      error
 	StatusCode int
-	Reason     string // "rate_limit", "overloaded", "timeout", "circuit_open", "network", etc.
+	Reason     string        // "rate_limit", "overloaded", "timeout", "circuit_open", "network", etc.
+	RetryAfter time.Duration // from provider's Retry-After header
 	Duration   time.Duration
 	Timestamp  time.Time
 }

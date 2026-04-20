@@ -92,8 +92,8 @@ func TestHandleStatus_ReturnsJSON(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
-	if resp.Version != "0.7.0" {
-		t.Errorf("Version = %q, want %q", resp.Version, "0.7.0")
+	if resp.Version != "0.8.0" {
+		t.Errorf("Version = %q, want %q", resp.Version, "0.8.0")
 	}
 	if resp.UptimeSec < 0 {
 		t.Error("UptimeSec should not be negative")

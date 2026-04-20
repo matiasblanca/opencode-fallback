@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -613,5 +614,252 @@ func TestFallbackResultString(t *testing.T) {
 	}
 	if r.Provider != "openai" {
 		t.Errorf("Provider = %q, want %q", r.Provider, "openai")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Retry with Backoff
+// --------------------------------------------------------------------------
+
+func TestRetry_RetriesBeforeFallingThrough(t *testing.T) {
+	// Provider 1: fails twice with 429, then succeeds on 3rd attempt.
+	var attempts int32
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			n := atomic.AddInt32(&attempts, 1)
+			if n <= 2 {
+				return nil, &provider.ProviderError{ProviderID: "p1", StatusCode: 429}
+			}
+			return &provider.ProxyResponse{StatusCode: 200, Body: []byte(`{"ok":true}`)}, nil
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.maxRetries = 2
+	chain.retryBaseDelay = 10 * time.Millisecond // fast for testing
+	chain.maxRetryDelay = 50 * time.Millisecond
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success after retries")
+	}
+	if result.Provider != "p1" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "p1")
+	}
+	if atomic.LoadInt32(&attempts) != 3 {
+		t.Errorf("attempts = %d, want 3", atomic.LoadInt32(&attempts))
+	}
+}
+
+func TestRetry_FatalErrorSkipsRetry(t *testing.T) {
+	// Provider 1: returns 401 (fatal) — should NOT retry, should fall to p2.
+	var p1Attempts int32
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			atomic.AddInt32(&p1Attempts, 1)
+			return nil, &provider.ProviderError{ProviderID: "p1", StatusCode: 401}
+		},
+	}
+	p2 := &mockProvider{id: "p2", available: true}
+
+	chain := NewChain(
+		[]ProviderWithModel{
+			{Provider: p1, ModelID: "model-a"},
+			{Provider: p2, ModelID: "model-b"},
+		},
+		map[string]*circuit.CircuitBreaker{
+			"p1": circuit.New("p1", discardLogger()),
+			"p2": circuit.New("p2", discardLogger()),
+		},
+		discardLogger(),
+	)
+	chain.maxRetries = 2
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success from p2")
+	}
+	if result.Provider != "p2" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "p2")
+	}
+	// p1 should have been called exactly once (no retry on fatal).
+	if n := atomic.LoadInt32(&p1Attempts); n != 1 {
+		t.Errorf("p1 attempts = %d, want 1", n)
+	}
+}
+
+func TestRetry_RespectsRetryAfterHeader(t *testing.T) {
+	// Verify that retryDelay respects Retry-After.
+	chain := &Chain{
+		retryBaseDelay: 1 * time.Second,
+		maxRetryDelay:  10 * time.Second,
+	}
+
+	// With Retry-After = 3s, delay should be 3s (not exponential).
+	d := chain.retryDelay(0, 3*time.Second)
+	if d != 3*time.Second {
+		t.Errorf("delay = %v, want 3s", d)
+	}
+
+	// With Retry-After = 0, use exponential: 1s * 2^0 = 1s.
+	d = chain.retryDelay(0, 0)
+	if d != 1*time.Second {
+		t.Errorf("delay = %v, want 1s", d)
+	}
+
+	// With Retry-After = 0, attempt 2: 1s * 2^2 = 4s.
+	d = chain.retryDelay(2, 0)
+	if d != 4*time.Second {
+		t.Errorf("delay = %v, want 4s", d)
+	}
+
+	// Cap at maxRetryDelay.
+	d = chain.retryDelay(10, 0)
+	if d != 10*time.Second {
+		t.Errorf("delay = %v, want 10s (capped)", d)
+	}
+}
+
+func TestRetry_NoRetryWhenDisabled(t *testing.T) {
+	var attempts int32
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			atomic.AddInt32(&attempts, 1)
+			return nil, &provider.ProviderError{ProviderID: "p1", StatusCode: 429}
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.maxRetries = 0 // disabled
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if result.Success {
+		t.Fatal("expected failure (no retry, only 1 failing provider)")
+	}
+	if n := atomic.LoadInt32(&attempts); n != 1 {
+		t.Errorf("attempts = %d, want 1", n)
+	}
+}
+
+func TestRetry_ContextCancelledDuringWait(t *testing.T) {
+	var attempts int32
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			atomic.AddInt32(&attempts, 1)
+			return nil, &provider.ProviderError{ProviderID: "p1", StatusCode: 429}
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.maxRetries = 3
+	chain.retryBaseDelay = 5 * time.Second // long delay
+	chain.maxRetryDelay = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after a short delay (while waiting for retry).
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(ctx, req)
+
+	if result.Success {
+		t.Fatal("expected failure due to context cancellation")
+	}
+	// Should have attempted once, then cancelled during retry wait.
+	if n := atomic.LoadInt32(&attempts); n != 1 {
+		t.Errorf("attempts = %d, want 1 (cancelled during retry wait)", n)
+	}
+	// Last failure should be context_cancelled.
+	last := result.Failures[len(result.Failures)-1]
+	if last.Reason != "context_cancelled" {
+		t.Errorf("last failure reason = %q, want %q", last.Reason, "context_cancelled")
+	}
+}
+
+func TestRetry_ShouldRetry(t *testing.T) {
+	chain := &Chain{}
+	tests := []struct {
+		reason string
+		want   bool
+	}{
+		{"rate_limit", true},
+		{"rate_limit_tokens_exhausted", true},
+		{"overloaded", true},
+		{"server_error", true},
+		{"network", true},
+		{"ttft_timeout", true},
+		{"unknown", true},
+		{"auth", false},
+		{"context_overflow", false},
+		{"model_not_found", false},
+		{"client_error", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			got := chain.shouldRetry(FailureRecord{Reason: tt.reason})
+			if got != tt.want {
+				t.Errorf("shouldRetry(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetry_UsesRecordFailureWithReason(t *testing.T) {
+	// Verify that after retries exhaust, the circuit breaker records
+	// with reason-aware weights instead of plain RecordFailure.
+	cb := circuit.New("p1", discardLogger())
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			return nil, &provider.ProviderError{ProviderID: "p1", StatusCode: 429}
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": cb},
+		discardLogger(),
+	)
+	chain.maxRetries = 0 // no retry, just test CB recording
+	chain.retryBaseDelay = 10 * time.Millisecond
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+
+	// Run chain once — rate_limit has weight 1, threshold=3 → still closed.
+	_ = chain.Execute(context.Background(), req)
+	if cb.CurrentState() != circuit.StateClosed {
+		t.Error("CB should be closed after 1 rate_limit (weight 1, threshold 3)")
+	}
+
+	// Run two more times → total weight 3 → should open.
+	_ = chain.Execute(context.Background(), req)
+	_ = chain.Execute(context.Background(), req)
+	if cb.CurrentState() != circuit.StateOpen {
+		t.Error("CB should be open after 3 rate_limits (weight 3, threshold 3)")
 	}
 }

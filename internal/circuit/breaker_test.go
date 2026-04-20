@@ -431,6 +431,214 @@ func TestReset(t *testing.T) {
 // State.String
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// RecordRateLimitWithCooldown + CooldownRemaining
+// --------------------------------------------------------------------------
+
+func TestRecordRateLimitWithCooldown(t *testing.T) {
+	cb := New("test", testLogger())
+
+	// Record a rate limit with 60s cooldown.
+	cb.RecordRateLimitWithCooldown(60 * time.Second)
+
+	if cb.CurrentState() != StateOpen {
+		t.Fatal("should be open after rate limit cooldown")
+	}
+
+	// Should not allow requests immediately.
+	if cb.Allow() {
+		t.Error("should not allow during cooldown")
+	}
+
+	// Remaining cooldown should be approximately 60s.
+	remaining := cb.CooldownRemaining()
+	if remaining < 59*time.Second || remaining > 61*time.Second {
+		t.Errorf("CooldownRemaining = %v, want ~60s", remaining)
+	}
+}
+
+func TestCooldownRespectsMinimumOpenDuration(t *testing.T) {
+	cb := New("test", testLogger())
+	// OpenDuration default is 30s. If Retry-After is only 5s,
+	// the cooldown should be 30s (the longer of the two).
+	cb.RecordRateLimitWithCooldown(5 * time.Second)
+
+	if cb.CurrentState() != StateOpen {
+		t.Fatal("should be open")
+	}
+
+	// Cooldown should be at least OpenDuration (30s), not 5s.
+	remaining := cb.CooldownRemaining()
+	if remaining < 29*time.Second {
+		t.Errorf("CooldownRemaining = %v, want >= 29s (respects OpenDuration)", remaining)
+	}
+}
+
+func TestCooldownClearsOnTransition(t *testing.T) {
+	now := time.Now()
+	cb := New("test", testLogger())
+	cb.now = func() time.Time { return now }
+
+	cb.RecordRateLimitWithCooldown(10 * time.Second)
+
+	// Advance time past cooldown (OpenDuration=30s wins since 10s < 30s).
+	cb.now = func() time.Time { return now.Add(35 * time.Second) }
+
+	// Allow should return true (transition to half-open).
+	if !cb.Allow() {
+		t.Fatal("should allow after cooldown expires")
+	}
+	if cb.CurrentState() != StateHalfOpen {
+		t.Errorf("state = %v, want half-open", cb.CurrentState())
+	}
+
+	// CooldownRemaining should be 0 after clear.
+	if r := cb.CooldownRemaining(); r != 0 {
+		t.Errorf("CooldownRemaining = %v, want 0", r)
+	}
+}
+
+func TestCooldownLongerThanOpenDuration(t *testing.T) {
+	now := time.Now()
+	cb := New("test", testLogger())
+	cb.now = func() time.Time { return now }
+
+	// Cooldown = 60s, which is longer than OpenDuration (30s).
+	cb.RecordRateLimitWithCooldown(60 * time.Second)
+
+	// After 35s (past OpenDuration but not past cooldown), should still be blocked.
+	cb.now = func() time.Time { return now.Add(35 * time.Second) }
+	if cb.Allow() {
+		t.Error("should not allow before cooldown expires (60s)")
+	}
+
+	// After 60s, should allow.
+	cb.now = func() time.Time { return now.Add(60 * time.Second) }
+	if !cb.Allow() {
+		t.Fatal("should allow after 60s cooldown expires")
+	}
+	if cb.CurrentState() != StateHalfOpen {
+		t.Errorf("state = %v, want half-open", cb.CurrentState())
+	}
+}
+
+func TestCooldownRemainingWhenNotInCooldown(t *testing.T) {
+	cb := New("test", testLogger())
+	if r := cb.CooldownRemaining(); r != 0 {
+		t.Errorf("CooldownRemaining = %v, want 0 when not in cooldown", r)
+	}
+}
+
+// --------------------------------------------------------------------------
+// FailureWeight
+// --------------------------------------------------------------------------
+
+func TestFailureWeight(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   int
+	}{
+		{"rate_limit", 1},
+		{"rate_limit_tokens_exhausted", 1},
+		{"overloaded", 1},
+		{"server_error", 2},
+		{"network", 2},
+		{"ttft_timeout", 3},
+		{"auth", 0},
+		{"context_overflow", 0},
+		{"client_error", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			got := FailureWeight(tt.reason)
+			if got != tt.want {
+				t.Errorf("FailureWeight(%q) = %d, want %d", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// RecordFailureWithReason
+// --------------------------------------------------------------------------
+
+func TestRecordFailureWithReason_RateLimitSlower(t *testing.T) {
+	// Rate limits (weight 1) need 3 occurrences to trip threshold=3.
+	cb := New("test", testLogger())
+	cb.RecordFailureWithReason("rate_limit")
+	cb.RecordFailureWithReason("rate_limit")
+
+	if cb.CurrentState() != StateClosed {
+		t.Error("2 rate limits should not open circuit (threshold=3)")
+	}
+
+	cb.RecordFailureWithReason("rate_limit")
+	if cb.CurrentState() != StateOpen {
+		t.Error("3 rate limits should open circuit")
+	}
+}
+
+func TestRecordFailureWithReason_ServerErrorFaster(t *testing.T) {
+	// Server errors (weight 2) need only 2 occurrences to trip threshold=3.
+	cb := New("test", testLogger())
+	cb.RecordFailureWithReason("server_error")
+
+	if cb.CurrentState() != StateClosed {
+		t.Error("1 server error should not open circuit")
+	}
+
+	cb.RecordFailureWithReason("server_error") // total weight = 4 >= 3
+	if cb.CurrentState() != StateOpen {
+		t.Error("2 server errors (weight 4) should open circuit (threshold=3)")
+	}
+}
+
+func TestRecordFailureWithReason_FatalIgnored(t *testing.T) {
+	// Fatal errors (weight 0) should never open the circuit.
+	cb := New("test", testLogger())
+	for i := 0; i < 10; i++ {
+		cb.RecordFailureWithReason("auth")
+	}
+	if cb.CurrentState() != StateClosed {
+		t.Error("fatal errors should not affect circuit state")
+	}
+}
+
+func TestRecordFailureWithReason_TTFTTripsQuickly(t *testing.T) {
+	// TTFT timeout (weight 3) trips immediately on first occurrence.
+	cb := New("test", testLogger())
+	cb.RecordFailureWithReason("ttft_timeout") // weight 3 >= threshold 3
+	if cb.CurrentState() != StateOpen {
+		t.Error("single TTFT timeout (weight 3) should open circuit (threshold=3)")
+	}
+}
+
+func TestRecordFailureWithReason_HalfOpenReopens(t *testing.T) {
+	cb := New("test", testLogger())
+	base := time.Now()
+	cb.now = fixedNow(base)
+
+	// Drive to Open → HalfOpen.
+	for i := 0; i < cb.FailureThreshold; i++ {
+		cb.RecordFailure()
+	}
+	cb.now = fixedNow(base.Add(cb.OpenDuration + time.Second))
+	_ = cb.Allow() // → HalfOpen
+
+	if cb.CurrentState() != StateHalfOpen {
+		t.Fatalf("expected HalfOpen, got %v", cb.CurrentState())
+	}
+
+	cb.RecordFailureWithReason("server_error")
+	if cb.CurrentState() != StateOpen {
+		t.Error("RecordFailureWithReason in HalfOpen should reopen circuit")
+	}
+}
+
+// --------------------------------------------------------------------------
+// State.String
+// --------------------------------------------------------------------------
+
 func TestStateString(t *testing.T) {
 	tests := []struct {
 		state State

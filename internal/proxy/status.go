@@ -18,9 +18,10 @@ type StatusResponse struct {
 
 // ProviderStatus shows the health of a single provider.
 type ProviderStatus struct {
-	ID           string `json:"id"`
-	CircuitState string `json:"circuit_state"` // "closed", "open", "half-open"
-	Available    bool   `json:"available"`      // IsAvailable()
+	ID            string `json:"id"`
+	CircuitState  string `json:"circuit_state"`            // "closed", "open", "half-open"
+	Available     bool   `json:"available"`                // IsAvailable()
+	CooldownUntil string `json:"cooldown_until,omitempty"` // ISO8601 timestamp if in cooldown
 }
 
 // FallbackEvent records a single fallback occurrence for the status endpoint.
