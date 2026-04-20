@@ -3,6 +3,7 @@ package fallback
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/matiasblanca/opencode-fallback/internal/circuit"
@@ -74,7 +75,8 @@ func NewChain(
 func (c *Chain) Execute(ctx context.Context, req *provider.ProxyRequest) FallbackResult {
 	var failures []FailureRecord
 
-	for _, entry := range c.providers {
+	sorted := c.sortByHealth()
+	for _, entry := range sorted {
 		pid := entry.Provider.ID()
 		mid := entry.ModelID
 
@@ -149,8 +151,8 @@ func (c *Chain) Execute(ctx context.Context, req *provider.ProxyRequest) Fallbac
 		if lastFailure != nil {
 			failures = append(failures, *lastFailure)
 
-			// Record to circuit breaker with reason awareness.
-			if hasCB {
+			// Don't record aborted requests to circuit breaker.
+			if hasCB && lastFailure.Reason != "aborted" {
 				if lastFailure.RetryAfter > 0 &&
 					(lastFailure.Reason == "rate_limit" || lastFailure.Reason == "rate_limit_tokens_exhausted") {
 					breaker.RecordRateLimitWithCooldown(lastFailure.RetryAfter)
@@ -158,6 +160,11 @@ func (c *Chain) Execute(ctx context.Context, req *provider.ProxyRequest) Fallbac
 					breaker.RecordFailureWithReason(lastFailure.Reason)
 				}
 			}
+		}
+
+		// If context was cancelled, don't try more providers.
+		if ctx.Err() != nil {
+			return FallbackResult{Success: false, Failures: failures}
 		}
 
 		reason := "unknown"
@@ -203,18 +210,23 @@ func (c *Chain) attemptProvider(
 			// TTFT check: verify the stream actually produces events.
 			if c.ttftTimeout > 0 {
 				firstEvent, ttftErr := parser.NextWithTimeout(c.ttftTimeout)
-				if ttftErr != nil {
-					// Stream opened but hung — treat as failure.
-					parser.Close()
-					return nil, &FailureRecord{
-						ProviderID: pid,
-						ModelID:    mid,
-						Error:      ttftErr,
-						Reason:     "ttft_timeout",
-						Duration:   time.Since(start),
-						Timestamp:  time.Now(),
-					}
+			if ttftErr != nil {
+				// Stream opened but hung — treat as failure.
+				parser.Close()
+				// Don't penalize provider if WE cancelled the stream.
+				reason := "ttft_timeout"
+				if ctx.Err() != nil {
+					reason = "aborted"
 				}
+				return nil, &FailureRecord{
+					ProviderID: pid,
+					ModelID:    mid,
+					Error:      ttftErr,
+					Reason:     reason,
+					Duration:   time.Since(start),
+					Timestamp:  time.Now(),
+				}
+			}
 
 				// First event received — stream is alive.
 				wrappedParser := stream.NewPrefixedParser(parser, firstEvent)
@@ -240,7 +252,17 @@ func (c *Chain) attemptProvider(
 				Stream:   parser,
 			}, nil
 		}
-		// Stream open failed — classify below.
+		// Stream open failed.
+		if ctx.Err() != nil {
+			return nil, &FailureRecord{
+				ProviderID: pid,
+				ModelID:    mid,
+				Error:      ctx.Err(),
+				Reason:     "aborted",
+				Duration:   time.Since(start),
+				Timestamp:  time.Now(),
+			}
+		}
 		return nil, c.classifyFailureRecord(entry, sErr, time.Since(start))
 	}
 
@@ -258,6 +280,16 @@ func (c *Chain) attemptProvider(
 		}, nil
 	}
 
+	if ctx.Err() != nil {
+		return nil, &FailureRecord{
+			ProviderID: pid,
+			ModelID:    mid,
+			Error:      ctx.Err(),
+			Reason:     "aborted",
+			Duration:   time.Since(start),
+			Timestamp:  time.Now(),
+		}
+	}
 	return nil, c.classifyFailureRecord(entry, err, time.Since(start))
 }
 
@@ -288,9 +320,36 @@ func (c *Chain) shouldRetry(failure FailureRecord) bool {
 		"server_error", "network", "ttft_timeout", "unknown":
 		return true
 	default:
-		// Fatal: auth, context_overflow, model_not_found, client_error
+		// Fatal: auth, context_overflow, model_not_found, client_error,
+		// quota_exhausted, aborted
 		return false
 	}
+}
+
+// sortByHealth returns providers sorted by circuit breaker health score
+// (highest first). The sort is stable, so providers with equal scores
+// retain their configured order.
+func (c *Chain) sortByHealth() []ProviderWithModel {
+	sorted := make([]ProviderWithModel, len(c.providers))
+	copy(sorted, c.providers)
+
+	sort.SliceStable(sorted, func(i, j int) bool {
+		iScore := c.healthScore(sorted[i].Provider.ID())
+		jScore := c.healthScore(sorted[j].Provider.ID())
+		return iScore > jScore // higher score = tried first
+	})
+
+	return sorted
+}
+
+// healthScore returns the health score for a provider, or 3 (healthy)
+// if no circuit breaker is configured for it.
+func (c *Chain) healthScore(providerID string) int {
+	breaker, ok := c.breakers[providerID]
+	if !ok {
+		return 3 // no CB = assume healthy
+	}
+	return breaker.HealthScore()
 }
 
 // classifyFailureRecord creates a FailureRecord from an error, checking for

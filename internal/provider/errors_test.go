@@ -87,6 +87,58 @@ func TestClassifyDeepSeekError_ContextOverflow(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// IsQuotaExhausted
+// --------------------------------------------------------------------------
+
+func TestIsQuotaExhausted(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"openai quota", `{"error":{"message":"You exceeded your current quota"}}`, true},
+		{"billing limit", `{"error":{"message":"billing hard limit reached"}}`, true},
+		{"insufficient quota", `{"error":{"code":"insufficient_quota"}}`, true},
+		{"spending limit", `{"error":{"message":"spending limit exceeded"}}`, true},
+		{"credit balance", `{"error":{"message":"credit balance is too low"}}`, true},
+		{"monthly limit", `{"error":{"message":"monthly limit reached"}}`, true},
+		{"normal rate limit", `{"error":{"message":"rate limit exceeded"}}`, false},
+		{"empty body", ``, false},
+		{"unrelated error", `{"error":{"message":"server error"}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsQuotaExhausted([]byte(tt.body))
+			if got != tt.want {
+				t.Errorf("IsQuotaExhausted(%q) = %v, want %v", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyGenericOpenAIError_QuotaExhausted(t *testing.T) {
+	body := []byte(`{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}`)
+	got := ClassifyGenericOpenAIError(429, nil, body)
+	if got.Type != ErrorFatal {
+		t.Errorf("Type = %v, want ErrorFatal", got.Type)
+	}
+	if got.Reason != "quota_exhausted" {
+		t.Errorf("Reason = %q, want %q", got.Reason, "quota_exhausted")
+	}
+}
+
+func TestClassifyAnthropicError_QuotaExhausted(t *testing.T) {
+	body := []byte(`{"error":{"message":"billing hard limit reached"}}`)
+	got := ClassifyAnthropicError(429, nil, body)
+	if got.Type != ErrorFatal {
+		t.Errorf("Type = %v, want ErrorFatal", got.Type)
+	}
+	if got.Reason != "quota_exhausted" {
+		t.Errorf("Reason = %q, want %q", got.Reason, "quota_exhausted")
+	}
+}
+
+// --------------------------------------------------------------------------
 // ErrorClassification methods
 // --------------------------------------------------------------------------
 

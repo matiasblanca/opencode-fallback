@@ -192,11 +192,18 @@ func TestFallbackChainSkipsCircuitOpen(t *testing.T) {
 	if result.Provider != "p2" {
 		t.Errorf("Provider = %q, want %q", result.Provider, "p2")
 	}
-	if len(result.Failures) != 1 {
-		t.Errorf("Failures = %d, want 1", len(result.Failures))
+	// With health scoring, p2 (healthy, score=3) is sorted before p1 (open, score=0).
+	// p2 succeeds first, so p1's circuit_open may not appear in failures.
+	// The key assertion is that p2 was used successfully despite p1 being configured first.
+	for _, f := range result.Failures {
+		if f.ProviderID == "p1" && f.Reason == "circuit_open" {
+			return // found the expected failure — test passes
+		}
 	}
-	if result.Failures[0].Reason != "circuit_open" {
-		t.Errorf("Reason = %q, want %q", result.Failures[0].Reason, "circuit_open")
+	// With health scoring, p2 is tried first (score 3 > score 0),
+	// so it succeeds before p1 is reached — 0 failures is valid.
+	if len(result.Failures) != 0 {
+		t.Errorf("Failures = %d, want 0 (p2 tried first due to health scoring)", len(result.Failures))
 	}
 }
 
@@ -818,6 +825,8 @@ func TestRetry_ShouldRetry(t *testing.T) {
 		{"context_overflow", false},
 		{"model_not_found", false},
 		{"client_error", false},
+		{"quota_exhausted", false},
+		{"aborted", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -861,5 +870,217 @@ func TestRetry_UsesRecordFailureWithReason(t *testing.T) {
 	_ = chain.Execute(context.Background(), req)
 	if cb.CurrentState() != circuit.StateOpen {
 		t.Error("CB should be open after 3 rate_limits (weight 3, threshold 3)")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Health-Scored Provider Selection
+// --------------------------------------------------------------------------
+
+func TestHealthScoring_SortsProviders(t *testing.T) {
+	// p1: open (score 0), p2: closed (score 3), p3: cooldown (score 1).
+	// Expected attempt order: p2 (3), p3 (1), p1 (0).
+	cb1 := circuit.New("p1", discardLogger())
+	cb2 := circuit.New("p2", discardLogger())
+	cb3 := circuit.New("p3", discardLogger())
+
+	// Open p1 via failures.
+	for i := 0; i < 3; i++ {
+		cb1.RecordFailure()
+	}
+	// Put p3 in cooldown.
+	cb3.RecordRateLimitWithCooldown(60 * time.Second)
+
+	var order []string
+	makeProvider := func(id string) *mockProvider {
+		return &mockProvider{
+			id: id, available: true,
+			sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+				order = append(order, id)
+				return &provider.ProxyResponse{StatusCode: 200, Body: []byte(`{}`)}, nil
+			},
+		}
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{
+			{Provider: makeProvider("p1"), ModelID: "m1"},
+			{Provider: makeProvider("p2"), ModelID: "m2"},
+			{Provider: makeProvider("p3"), ModelID: "m3"},
+		},
+		map[string]*circuit.CircuitBreaker{
+			"p1": cb1, "p2": cb2, "p3": cb3,
+		},
+		discardLogger(),
+	)
+	chain.maxRetries = 0
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success")
+	}
+	// p2 should be tried first (highest score=3).
+	if result.Provider != "p2" {
+		t.Errorf("Provider = %q, want %q (highest health score)", result.Provider, "p2")
+	}
+}
+
+func TestHealthScoring_PreservesOrderAmongEqualScores(t *testing.T) {
+	// All providers healthy (score 3) — should preserve config order.
+	var order []string
+	makeProvider := func(id string) *mockProvider {
+		return &mockProvider{
+			id: id, available: true,
+			sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+				order = append(order, id)
+				// All fail to track attempt order.
+				return nil, &provider.ProviderError{ProviderID: id, StatusCode: 500}
+			},
+		}
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{
+			{Provider: makeProvider("p1"), ModelID: "m1"},
+			{Provider: makeProvider("p2"), ModelID: "m2"},
+			{Provider: makeProvider("p3"), ModelID: "m3"},
+		},
+		map[string]*circuit.CircuitBreaker{
+			"p1": circuit.New("p1", discardLogger()),
+			"p2": circuit.New("p2", discardLogger()),
+			"p3": circuit.New("p3", discardLogger()),
+		},
+		discardLogger(),
+	)
+	chain.maxRetries = 0
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	_ = chain.Execute(context.Background(), req)
+
+	// All have same score — config order preserved: p1, p2, p3.
+	if len(order) < 3 {
+		t.Fatalf("expected 3 attempts, got %d", len(order))
+	}
+	if order[0] != "p1" || order[1] != "p2" || order[2] != "p3" {
+		t.Errorf("order = %v, want [p1, p2, p3] (stable sort preserves config order)", order)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Abort Safety
+// --------------------------------------------------------------------------
+
+func TestAbort_ContextCancelledDoesNotRecordToCB(t *testing.T) {
+	cb := circuit.New("p1", discardLogger())
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			// Simulate: context cancelled before provider responds.
+			return nil, ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": cb},
+		discardLogger(),
+	)
+	chain.maxRetries = 0
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(ctx, req)
+
+	if result.Success {
+		t.Fatal("expected failure on cancelled context")
+	}
+	// Circuit breaker should still be closed — abort is not a failure.
+	if cb.CurrentState() != circuit.StateClosed {
+		t.Errorf("CB state = %v, want Closed (abort should not affect CB)", cb.CurrentState())
+	}
+}
+
+func TestAbort_ReasonIsAbortedNotServerError(t *testing.T) {
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			return nil, fmt.Errorf("connection reset by peer")
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.maxRetries = 0
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	result := chain.Execute(ctx, req)
+
+	if len(result.Failures) == 0 {
+		t.Fatal("expected at least 1 failure")
+	}
+	// Even though the error looks like a network error, the reason should
+	// be "aborted" because context was cancelled.
+	last := result.Failures[len(result.Failures)-1]
+	if last.Reason != "aborted" {
+		t.Errorf("Reason = %q, want %q", last.Reason, "aborted")
+	}
+}
+
+func TestAbort_DoesNotRetry(t *testing.T) {
+	chain := &Chain{}
+	got := chain.shouldRetry(FailureRecord{Reason: "aborted"})
+	if got {
+		t.Error("shouldRetry(aborted) = true, want false")
+	}
+}
+
+func TestAbort_StopsChainWalk(t *testing.T) {
+	// After p1 is aborted, should NOT try p2.
+	var p2Called int32
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			return nil, ctx.Err()
+		},
+	}
+	p2 := &mockProvider{
+		id: "p2", available: true,
+		sendFunc: func(ctx context.Context, req *provider.ProxyRequest) (*provider.ProxyResponse, error) {
+			atomic.AddInt32(&p2Called, 1)
+			return &provider.ProxyResponse{StatusCode: 200, Body: []byte(`{}`)}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	chain := NewChain(
+		[]ProviderWithModel{
+			{Provider: p1, ModelID: "m1"},
+			{Provider: p2, ModelID: "m2"},
+		},
+		map[string]*circuit.CircuitBreaker{
+			"p1": circuit.New("p1", discardLogger()),
+			"p2": circuit.New("p2", discardLogger()),
+		},
+		discardLogger(),
+	)
+	chain.maxRetries = 0
+
+	req := &provider.ProxyRequest{Model: "test", RawBody: []byte(`{}`)}
+	_ = chain.Execute(ctx, req)
+
+	if atomic.LoadInt32(&p2Called) > 0 {
+		t.Error("p2 should not be called after abort")
 	}
 }

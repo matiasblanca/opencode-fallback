@@ -32,6 +32,38 @@ var overflowPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)request entity too large`),
 }
 
+// quotaExhaustedPatterns detects billing quota exhaustion from error bodies.
+// These are 429 responses where the provider has exhausted billing quota,
+// not a temporary rate limit. The provider won't recover in seconds.
+var quotaExhaustedPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)exceeded your current quota`),
+	regexp.MustCompile(`(?i)billing hard limit`),
+	regexp.MustCompile(`(?i)quota exceeded`),
+	regexp.MustCompile(`(?i)insufficient_quota`),
+	regexp.MustCompile(`(?i)spending limit`),
+	regexp.MustCompile(`(?i)billing limit`),
+	regexp.MustCompile(`(?i)account.*quota.*exhausted`),
+	regexp.MustCompile(`(?i)usage limit reached`),
+	regexp.MustCompile(`(?i)monthly.*limit.*reached`),
+	regexp.MustCompile(`(?i)credit.*balance.*is.*(?:too low|insufficient|zero)`),
+}
+
+// IsQuotaExhausted checks if an error body matches a known billing
+// quota exhaustion pattern. Used to distinguish temporary rate limits
+// from persistent billing exhaustion.
+func IsQuotaExhausted(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	bodyStr := string(body)
+	for _, p := range quotaExhaustedPatterns {
+		if p.MatchString(bodyStr) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsOverflow checks if an error body matches a known context overflow pattern.
 // Used by all provider classifiers to override the default status-based
 // classification. Overflow errors are always fatal — fallback won't help.
@@ -78,7 +110,8 @@ type ErrorClassification struct {
 	Type ErrorType
 	// Reason is a short machine-readable reason string.
 	// Values: "rate_limit", "rate_limit_tokens_exhausted", "overloaded",
-	// "auth", "server_error", "network", "client_error".
+	// "auth", "server_error", "network", "client_error", "quota_exhausted",
+	// "context_overflow", "model_not_found".
 	Reason string
 	// RetryAfter is the duration the provider suggests waiting before retry.
 	// Zero if the provider did not include a Retry-After header.
@@ -123,6 +156,14 @@ func ClassifyAnthropicError(status int, headers http.Header, body []byte) ErrorC
 
 	switch {
 	case status == 429:
+		// Check for quota exhaustion BEFORE generic rate limit.
+		if IsQuotaExhausted(body) {
+			return ErrorClassification{
+				Type:       ErrorFatal,
+				Reason:     "quota_exhausted",
+				StatusCode: status,
+			}
+		}
 		return ErrorClassification{
 			Type:       ErrorRetriable,
 			Reason:     "rate_limit",
@@ -201,6 +242,14 @@ func ClassifyGenericOpenAIError(status int, headers http.Header, body []byte) Er
 
 	switch {
 	case status == 429:
+		// Check for quota exhaustion BEFORE generic rate limit.
+		if IsQuotaExhausted(body) {
+			return ErrorClassification{
+				Type:       ErrorFatal,
+				Reason:     "quota_exhausted",
+				StatusCode: status,
+			}
+		}
 		reason := "rate_limit"
 		if headers.Get("X-Ratelimit-Remaining-Tokens") == "0" {
 			reason = "rate_limit_tokens_exhausted"

@@ -311,8 +311,36 @@ func FailureWeight(reason string) int {
 	case "ttft_timeout":
 		return 3
 	default:
-		return 0 // fatal errors don't contribute
+		// Fatal errors: auth, context_overflow, model_not_found,
+		// client_error, quota_exhausted, aborted — don't contribute to threshold.
+		return 0
 	}
+}
+
+// HealthScore returns a score representing the provider's health.
+// Higher is better. Used by the fallback chain to sort providers.
+//
+// Scores:
+//   - 3: Closed (healthy) — requests pass through normally
+//   - 2: HalfOpen (probing) — recovery in progress, worth trying
+//   - 1: Open with cooldown (rate limited) — will recover, lower priority
+//   - 0: Open (failed) — provider is down
+func (cb *CircuitBreaker) HealthScore() int {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case StateClosed:
+		return 3
+	case StateHalfOpen:
+		return 2
+	case StateOpen:
+		if !cb.cooldownUntil.IsZero() {
+			return 1 // rate-limited, will recover
+		}
+		return 0 // failed, provider down
+	}
+	return 0
 }
 
 // --------------------------------------------------------------------------

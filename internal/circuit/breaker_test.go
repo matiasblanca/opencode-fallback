@@ -547,6 +547,8 @@ func TestFailureWeight(t *testing.T) {
 		{"auth", 0},
 		{"context_overflow", 0},
 		{"client_error", 0},
+		{"quota_exhausted", 0},
+		{"aborted", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -632,6 +634,63 @@ func TestRecordFailureWithReason_HalfOpenReopens(t *testing.T) {
 	cb.RecordFailureWithReason("server_error")
 	if cb.CurrentState() != StateOpen {
 		t.Error("RecordFailureWithReason in HalfOpen should reopen circuit")
+	}
+}
+
+// --------------------------------------------------------------------------
+// HealthScore
+// --------------------------------------------------------------------------
+
+func TestHealthScore(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(cb *CircuitBreaker)
+		want  int
+	}{
+		{
+			"closed",
+			func(cb *CircuitBreaker) {},
+			3,
+		},
+		{
+			"open_from_failures",
+			func(cb *CircuitBreaker) {
+				for i := 0; i < cb.FailureThreshold; i++ {
+					cb.RecordFailure()
+				}
+			},
+			0,
+		},
+		{
+			"open_with_cooldown",
+			func(cb *CircuitBreaker) {
+				cb.RecordRateLimitWithCooldown(60 * time.Second)
+			},
+			1,
+		},
+		{
+			"half_open",
+			func(cb *CircuitBreaker) {
+				base := time.Now()
+				cb.now = fixedNow(base)
+				for i := 0; i < cb.FailureThreshold; i++ {
+					cb.RecordFailure()
+				}
+				cb.now = fixedNow(base.Add(cb.OpenDuration + time.Second))
+				_ = cb.Allow() // transitions to half-open
+			},
+			2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cb := New("test", testLogger())
+			tt.setup(cb)
+			got := cb.HealthScore()
+			if got != tt.want {
+				t.Errorf("HealthScore() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
