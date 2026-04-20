@@ -45,7 +45,7 @@ func runServe(args []string) error {
 	selector := buildSelector(cfg, registry, breakers, logger)
 
 	// Create handler and server.
-	handler := proxy.NewHandler(selector, logger)
+	handler := proxy.NewHandler(selector, breakers, registry, logger)
 	server := proxy.NewServer(cfg.Proxy.Host, cfg.Proxy.Port, handler, logger)
 
 	// Handle graceful shutdown.

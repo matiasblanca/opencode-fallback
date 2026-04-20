@@ -8,6 +8,85 @@ import (
 )
 
 // --------------------------------------------------------------------------
+// IsOverflow
+// --------------------------------------------------------------------------
+
+func TestIsOverflow(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"prompt too long", `{"error":{"message":"prompt is too long"}}`, true},
+		{"context length exceeded", `{"error":{"message":"context_length_exceeded"}}`, true},
+		{"exceeds limit with number", `{"error":{"message":"exceeds the limit of 200000"}}`, true},
+		{"input too long bedrock", `{"error":{"message":"input is too long for requested model"}}`, true},
+		{"request entity too large", `request entity too large`, true},
+		{"exceeds context window", `{"error":{"message":"This request exceeds the context window"}}`, true},
+		{"maximum context length", `{"error":{"message":"maximum context length is 128000 tokens"}}`, true},
+		{"reduce length", `{"error":{"message":"Please reduce the length of the messages"}}`, true},
+		{"normal rate limit", `{"error":{"message":"rate limit exceeded"}}`, false},
+		{"normal error", `{"error":{"message":"internal server error"}}`, false},
+		{"empty body", ``, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsOverflow([]byte(tt.body))
+			if got != tt.want {
+				t.Errorf("IsOverflow(%q) = %v, want %v", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyAnthropicError_ContextOverflow(t *testing.T) {
+	body := []byte(`{"error":{"message":"prompt is too long for model"}}`)
+	got := ClassifyAnthropicError(400, http.Header{}, body)
+	if got.Reason != "context_overflow" {
+		t.Errorf("Reason = %q, want context_overflow", got.Reason)
+	}
+	if got.Type != ErrorFatal {
+		t.Errorf("Type = %v, want ErrorFatal", got.Type)
+	}
+}
+
+func TestClassifyAnthropicError_HTTP413(t *testing.T) {
+	got := ClassifyAnthropicError(413, http.Header{}, nil)
+	if got.Reason != "context_overflow" {
+		t.Errorf("Reason = %q, want context_overflow", got.Reason)
+	}
+	if got.Type != ErrorFatal {
+		t.Errorf("Type = %v, want ErrorFatal", got.Type)
+	}
+}
+
+func TestClassifyGenericOpenAIError_ContextOverflow(t *testing.T) {
+	body := []byte(`{"error":{"message":"context_length_exceeded"}}`)
+	got := ClassifyGenericOpenAIError(400, http.Header{}, body)
+	if got.Reason != "context_overflow" {
+		t.Errorf("Reason = %q, want context_overflow", got.Reason)
+	}
+	if got.Type != ErrorFatal {
+		t.Errorf("Type = %v, want ErrorFatal", got.Type)
+	}
+}
+
+func TestClassifyGenericOpenAIError_HTTP413(t *testing.T) {
+	got := ClassifyGenericOpenAIError(413, http.Header{}, nil)
+	if got.Reason != "context_overflow" {
+		t.Errorf("Reason = %q, want context_overflow", got.Reason)
+	}
+}
+
+func TestClassifyDeepSeekError_ContextOverflow(t *testing.T) {
+	body := []byte(`{"error":{"message":"exceeds the limit of 65536"}}`)
+	got := ClassifyDeepSeekError(400, http.Header{}, body)
+	if got.Reason != "context_overflow" {
+		t.Errorf("Reason = %q, want context_overflow", got.Reason)
+	}
+}
+
+// --------------------------------------------------------------------------
 // ErrorClassification methods
 // --------------------------------------------------------------------------
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -455,6 +456,141 @@ func TestMatchGroup(t *testing.T) {
 				t.Errorf("MatchGroup(%q, %q) = %v, want %v", tt.model, tt.pattern, got, tt.want)
 			}
 		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// FallbackResult
+// --------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------
+// TTFT Timeout
+// --------------------------------------------------------------------------
+
+func TestTTFTTimeout_HangingStreamFallsToNext(t *testing.T) {
+	// Provider 1: opens stream but never sends events (hangs).
+	hangingPipe, _ := io.Pipe() // never writes
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		streamFunc: func(ctx context.Context, req *provider.ProxyRequest) (*stream.SSEParser, error) {
+			return stream.NewSSEParser(hangingPipe), nil
+		},
+	}
+
+	// Provider 2: opens stream and produces events immediately.
+	p2 := &mockProvider{
+		id: "p2", available: true,
+		streamFunc: func(ctx context.Context, req *provider.ProxyRequest) (*stream.SSEParser, error) {
+			body := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
+			reader := io.NopCloser(strings.NewReader(body))
+			return stream.NewSSEParser(reader), nil
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{
+			{Provider: p1, ModelID: "model-a"},
+			{Provider: p2, ModelID: "model-b"},
+		},
+		map[string]*circuit.CircuitBreaker{
+			"p1": circuit.New("p1", discardLogger()),
+			"p2": circuit.New("p2", discardLogger()),
+		},
+		discardLogger(),
+	)
+	// Use a very short timeout for testing.
+	chain.ttftTimeout = 100 * time.Millisecond
+
+	req := &provider.ProxyRequest{Model: "test", Stream: true, RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success from p2 after TTFT timeout on p1")
+	}
+	if result.Provider != "p2" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "p2")
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures = %d, want 1", len(result.Failures))
+	}
+	if result.Failures[0].Reason != "ttft_timeout" {
+		t.Errorf("Reason = %q, want %q", result.Failures[0].Reason, "ttft_timeout")
+	}
+
+	// Cleanup: close the hanging pipe.
+	hangingPipe.Close()
+}
+
+func TestTTFTTimeout_FastStreamSucceeds(t *testing.T) {
+	// Provider 1: opens stream and produces events immediately.
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		streamFunc: func(ctx context.Context, req *provider.ProxyRequest) (*stream.SSEParser, error) {
+			body := "data: {\"choices\":[{\"delta\":{\"content\":\"fast\"}}]}\n\ndata: [DONE]\n\n"
+			reader := io.NopCloser(strings.NewReader(body))
+			return stream.NewSSEParser(reader), nil
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.ttftTimeout = 1 * time.Second
+
+	req := &provider.ProxyRequest{Model: "test", Stream: true, RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success")
+	}
+	if result.Provider != "p1" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "p1")
+	}
+	if len(result.Failures) != 0 {
+		t.Errorf("Failures = %d, want 0", len(result.Failures))
+	}
+
+	// Verify the first event is preserved via PrefixedParser.
+	if result.Stream == nil {
+		t.Fatal("Stream should not be nil")
+	}
+	ev, err := result.Stream.Next()
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if ev.ContentDelta != "fast" {
+		t.Errorf("ContentDelta = %q, want %q", ev.ContentDelta, "fast")
+	}
+}
+
+func TestTTFTTimeout_DisabledPassesThrough(t *testing.T) {
+	// With TTFT disabled (0), stream should pass through without TTFT check.
+	p1 := &mockProvider{
+		id: "p1", available: true,
+		streamFunc: func(ctx context.Context, req *provider.ProxyRequest) (*stream.SSEParser, error) {
+			body := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+			reader := io.NopCloser(strings.NewReader(body))
+			return stream.NewSSEParser(reader), nil
+		},
+	}
+
+	chain := NewChain(
+		[]ProviderWithModel{{Provider: p1, ModelID: "model-a"}},
+		map[string]*circuit.CircuitBreaker{"p1": circuit.New("p1", discardLogger())},
+		discardLogger(),
+	)
+	chain.ttftTimeout = 0 // disabled
+
+	req := &provider.ProxyRequest{Model: "test", Stream: true, RawBody: []byte(`{}`)}
+	result := chain.Execute(context.Background(), req)
+
+	if !result.Success {
+		t.Fatal("expected success")
+	}
+	if result.Provider != "p1" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "p1")
 	}
 }
 

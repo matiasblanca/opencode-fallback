@@ -8,6 +8,46 @@ import (
 	"time"
 )
 
+// overflowPatterns detects context/prompt overflow from error response bodies.
+// These errors should NEVER trigger fallback — the client needs to reduce
+// the conversation, not try another provider with the same oversized prompt.
+//
+// Source: Consolidated from PR #20105 (anomalyco/opencode) and 3 published
+// fallback plugins. These patterns cover Anthropic, OpenAI, Google, DeepSeek,
+// AWS Bedrock, and generic OpenAI-compatible APIs.
+var overflowPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)prompt is too long`),
+	regexp.MustCompile(`(?i)input is too long for requested model`),
+	regexp.MustCompile(`(?i)exceeds the context window`),
+	regexp.MustCompile(`(?i)input token count.*exceeds the maximum`),
+	regexp.MustCompile(`(?i)maximum prompt length is \d+`),
+	regexp.MustCompile(`(?i)reduce the length of the messages`),
+	regexp.MustCompile(`(?i)maximum context length is \d+ tokens`),
+	regexp.MustCompile(`(?i)exceeds the limit of \d+`),
+	regexp.MustCompile(`(?i)exceeds the available context size`),
+	regexp.MustCompile(`(?i)greater than the context length`),
+	regexp.MustCompile(`(?i)context window exceeds limit`),
+	regexp.MustCompile(`(?i)exceeded model token limit`),
+	regexp.MustCompile(`(?i)context[_ ]length[_ ]exceeded`),
+	regexp.MustCompile(`(?i)request entity too large`),
+}
+
+// IsOverflow checks if an error body matches a known context overflow pattern.
+// Used by all provider classifiers to override the default status-based
+// classification. Overflow errors are always fatal — fallback won't help.
+func IsOverflow(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	bodyStr := string(body)
+	for _, p := range overflowPatterns {
+		if p.MatchString(bodyStr) {
+			return true
+		}
+	}
+	return false
+}
+
 // ErrorType classifies an error as retriable or fatal.
 type ErrorType int
 
@@ -71,6 +111,16 @@ func (c ErrorClassification) IsFatal() bool { return c.Type == ErrorFatal }
 //   - 500+: retriable (server error)
 //   - other 4xx: fatal (client error)
 func ClassifyAnthropicError(status int, headers http.Header, body []byte) ErrorClassification {
+	// Overflow takes priority — never fallback on context overflow,
+	// regardless of HTTP status code.
+	if IsOverflow(body) {
+		return ErrorClassification{
+			Type:       ErrorFatal,
+			Reason:     "context_overflow",
+			StatusCode: status,
+		}
+	}
+
 	switch {
 	case status == 429:
 		return ErrorClassification{
@@ -83,6 +133,12 @@ func ClassifyAnthropicError(status int, headers http.Header, body []byte) ErrorC
 		return ErrorClassification{
 			Type:       ErrorRetriable,
 			Reason:     "overloaded",
+			StatusCode: status,
+		}
+	case status == 413:
+		return ErrorClassification{
+			Type:       ErrorFatal,
+			Reason:     "context_overflow",
 			StatusCode: status,
 		}
 	case status == 401 || status == 403:
@@ -133,6 +189,16 @@ func ClassifyOpenAIError(status int, headers http.Header, body []byte) ErrorClas
 //   - 500+: retriable (server error)
 //   - other 4xx: fatal (client error)
 func ClassifyGenericOpenAIError(status int, headers http.Header, body []byte) ErrorClassification {
+	// Overflow takes priority — never fallback on context overflow,
+	// regardless of HTTP status code.
+	if IsOverflow(body) {
+		return ErrorClassification{
+			Type:       ErrorFatal,
+			Reason:     "context_overflow",
+			StatusCode: status,
+		}
+	}
+
 	switch {
 	case status == 429:
 		reason := "rate_limit"
@@ -149,6 +215,12 @@ func ClassifyGenericOpenAIError(status int, headers http.Header, body []byte) Er
 		return ErrorClassification{
 			Type:       ErrorRetriable,
 			Reason:     "overloaded",
+			StatusCode: status,
+		}
+	case status == 413:
+		return ErrorClassification{
+			Type:       ErrorFatal,
+			Reason:     "context_overflow",
 			StatusCode: status,
 		}
 	case status == 401 || status == 403:

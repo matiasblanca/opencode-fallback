@@ -6,7 +6,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
+
+// ErrTTFTTimeout is returned when the TTFT (Time-To-First-Token) timeout
+// expires. This means the provider opened a stream but did not produce
+// any SSE events within the configured timeout window.
+var ErrTTFTTimeout = fmt.Errorf("TTFT timeout: no SSE event received within deadline")
 
 // SSEEvent represents a parsed Server-Sent Events event.
 type SSEEvent struct {
@@ -41,6 +47,7 @@ type SSEParser struct {
 	scanner   *bufio.Scanner
 	reader    io.ReadCloser
 	transform DataTransformFunc
+	prefix    *SSEEvent // if set, returned on first Next() call
 }
 
 // NewSSEParser creates a parser that reads SSE events from the given reader.
@@ -65,6 +72,13 @@ func NewSSEParserWithTransform(reader io.ReadCloser, fn DataTransformFunc) *SSEP
 
 // Next returns the next SSE event. It returns io.EOF when the stream ends.
 func (p *SSEParser) Next() (SSEEvent, error) {
+	// Return buffered prefix event first (used by TTFT check).
+	if p.prefix != nil {
+		ev := *p.prefix
+		p.prefix = nil
+		return ev, nil
+	}
+
 	for p.scanner.Scan() {
 		line := p.scanner.Text()
 
@@ -150,4 +164,40 @@ func (p *SSEParser) parseDataLine(line string, eventType string) SSEEvent {
 // Close closes the underlying reader.
 func (p *SSEParser) Close() error {
 	return p.reader.Close()
+}
+
+// NextWithTimeout returns the next SSE event, but returns an error if no
+// event arrives within the given timeout. This is used for TTFT (Time-To-
+// First-Token) detection — if a provider opens a stream but hangs without
+// producing events, we need to detect it and fail over.
+//
+// The timeout only applies to the FIRST call. Subsequent calls should use
+// a longer timeout or no timeout (the model is actively streaming).
+func (p *SSEParser) NextWithTimeout(timeout time.Duration) (SSEEvent, error) {
+	type result struct {
+		event SSEEvent
+		err   error
+	}
+
+	ch := make(chan result, 1)
+	go func() {
+		ev, err := p.Next()
+		ch <- result{ev, err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.event, r.err
+	case <-time.After(timeout):
+		return SSEEvent{}, ErrTTFTTimeout
+	}
+}
+
+// NewPrefixedParser creates a parser that returns the given event on the
+// first call to Next(), then delegates to the underlying parser for all
+// subsequent events. Used after TTFT timeout verification — the first
+// event was consumed to prove the stream is alive and must be replayed.
+func NewPrefixedParser(parser *SSEParser, first SSEEvent) *SSEParser {
+	parser.prefix = &first
+	return parser
 }

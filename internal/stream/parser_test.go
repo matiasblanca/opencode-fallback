@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nopCloser wraps an io.Reader to satisfy io.ReadCloser.
@@ -334,6 +335,113 @@ func TestDetectStreamEnd(t *testing.T) {
 		})
 	}
 }
+
+// --------------------------------------------------------------------------
+// NextWithTimeout
+// --------------------------------------------------------------------------
+
+func TestNextWithTimeout_Success(t *testing.T) {
+	// SSE data arrives immediately → should succeed.
+	body := "data: {\"test\": true}\n\n"
+	reader := nopCloser{strings.NewReader(body)}
+	parser := NewSSEParser(reader)
+
+	ev, err := parser.NextWithTimeout(1 * time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ev.Data != `{"test": true}` {
+		t.Errorf("Data = %q, want %q", ev.Data, `{"test": true}`)
+	}
+}
+
+func TestNextWithTimeout_Timeout(t *testing.T) {
+	// Reader that blocks forever → should timeout.
+	pr, _ := io.Pipe() // never writes
+	parser := NewSSEParser(pr)
+
+	_, err := parser.NextWithTimeout(100 * time.Millisecond)
+	if err != ErrTTFTTimeout {
+		t.Fatalf("err = %v, want ErrTTFTTimeout", err)
+	}
+	pr.Close()
+}
+
+func TestNextWithTimeout_EOF(t *testing.T) {
+	// Empty reader → should return EOF, not timeout.
+	reader := nopCloser{strings.NewReader("")}
+	parser := NewSSEParser(reader)
+
+	_, err := parser.NextWithTimeout(1 * time.Second)
+	if err != io.EOF {
+		t.Fatalf("err = %v, want io.EOF", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// PrefixedParser
+// --------------------------------------------------------------------------
+
+func TestPrefixedParser(t *testing.T) {
+	body := "data: second\n\ndata: third\n\n"
+	reader := nopCloser{strings.NewReader(body)}
+	parser := NewSSEParser(reader)
+
+	first := SSEEvent{Data: "first", Raw: "data: first"}
+	prefixed := NewPrefixedParser(parser, first)
+
+	// First call returns the prefix event.
+	ev1, err := prefixed.Next()
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if ev1.Data != "first" {
+		t.Errorf("first Data = %q, want %q", ev1.Data, "first")
+	}
+
+	// Second call returns from the underlying parser.
+	ev2, err := prefixed.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if ev2.Data != "second" {
+		t.Errorf("second Data = %q, want %q", ev2.Data, "second")
+	}
+
+	// Third call returns from the underlying parser.
+	ev3, err := prefixed.Next()
+	if err != nil {
+		t.Fatalf("third Next: %v", err)
+	}
+	if ev3.Data != "third" {
+		t.Errorf("third Data = %q, want %q", ev3.Data, "third")
+	}
+}
+
+func TestPrefixedParser_PrefixConsumedOnce(t *testing.T) {
+	body := "data: real\n\n"
+	reader := nopCloser{strings.NewReader(body)}
+	parser := NewSSEParser(reader)
+
+	first := SSEEvent{Data: "buffered"}
+	prefixed := NewPrefixedParser(parser, first)
+
+	// First call: prefix
+	ev1, _ := prefixed.Next()
+	if ev1.Data != "buffered" {
+		t.Errorf("first Data = %q, want %q", ev1.Data, "buffered")
+	}
+
+	// Second call: NOT the prefix again
+	ev2, _ := prefixed.Next()
+	if ev2.Data != "real" {
+		t.Errorf("second Data = %q, want %q", ev2.Data, "real")
+	}
+}
+
+// --------------------------------------------------------------------------
+// StreamEndType detection
+// --------------------------------------------------------------------------
 
 func TestStreamEndTypeString(t *testing.T) {
 	tests := []struct {

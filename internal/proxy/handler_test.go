@@ -67,7 +67,7 @@ func newTestHandler(providers ...provider.Provider) *Handler {
 	}
 
 	selector := fallback.NewChainSelector(global, nil, nil, reg, breakers, discardLogger())
-	return NewHandler(selector, discardLogger())
+	return NewHandler(selector, breakers, reg, discardLogger())
 }
 
 func TestHandlerSuccess(t *testing.T) {

@@ -48,7 +48,7 @@ func runRun(args []string) error {
 
 	breakers := buildBreakers(cfg, registry, logger)
 	selector := buildSelector(cfg, registry, breakers, logger)
-	handler := proxy.NewHandler(selector, logger)
+	handler := proxy.NewHandler(selector, breakers, registry, logger)
 	server := proxy.NewServer(cfg.Proxy.Host, cfg.Proxy.Port, handler, logger)
 
 	// Start proxy in background.

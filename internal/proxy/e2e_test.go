@@ -123,7 +123,7 @@ func newE2EHandler(providers ...provider.Provider) *Handler {
 	}
 
 	selector := fallback.NewChainSelector(global, nil, nil, reg, breakers, e2eDiscardLogger())
-	return NewHandler(selector, e2eDiscardLogger())
+	return NewHandler(selector, breakers, reg, e2eDiscardLogger())
 }
 
 // newE2EHandlerWithBreakers is like newE2EHandler but accepts pre-built
@@ -138,7 +138,7 @@ func newE2EHandlerWithBreakers(breakers map[string]*circuit.CircuitBreaker, prov
 	}
 
 	selector := fallback.NewChainSelector(global, nil, nil, reg, breakers, e2eDiscardLogger())
-	return NewHandler(selector, e2eDiscardLogger())
+	return NewHandler(selector, breakers, reg, e2eDiscardLogger())
 }
 
 // chatBody returns a minimal valid OpenAI chat completions request body.

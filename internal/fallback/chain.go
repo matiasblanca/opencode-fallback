@@ -7,6 +7,17 @@ import (
 
 	"github.com/matiasblanca/opencode-fallback/internal/circuit"
 	"github.com/matiasblanca/opencode-fallback/internal/provider"
+	"github.com/matiasblanca/opencode-fallback/internal/stream"
+)
+
+const (
+	// DefaultTTFTTimeout is the default time to wait for the first SSE
+	// event after a stream is opened. If no event arrives, the stream
+	// is considered dead and the next provider is tried.
+	//
+	// Source: youngbinkim0/opencode-fallback uses 30s.
+	// We use 15s because our proxy adds minimal overhead.
+	DefaultTTFTTimeout = 15 * time.Second
 )
 
 // ProviderWithModel binds a provider to the specific model to use in
@@ -20,9 +31,10 @@ type ProviderWithModel struct {
 // It integrates with circuit breakers to skip providers that are in an Open
 // state, and records failure details for observability.
 type Chain struct {
-	providers []ProviderWithModel
-	breakers  map[string]*circuit.CircuitBreaker
-	logger    *slog.Logger
+	providers   []ProviderWithModel
+	breakers    map[string]*circuit.CircuitBreaker
+	logger      *slog.Logger
+	ttftTimeout time.Duration // 0 means disabled
 }
 
 // NewChain creates a fallback chain.
@@ -32,9 +44,10 @@ func NewChain(
 	logger *slog.Logger,
 ) *Chain {
 	return &Chain{
-		providers: providers,
-		breakers:  breakers,
-		logger:    logger,
+		providers:   providers,
+		breakers:    breakers,
+		logger:      logger,
+		ttftTimeout: DefaultTTFTTimeout,
 	}
 }
 
@@ -72,7 +85,53 @@ func (c *Chain) Execute(ctx context.Context, req *provider.ProxyRequest) Fallbac
 		if req.Stream {
 			parser, sErr := entry.Provider.SendStream(ctx, req)
 			if sErr == nil {
-				// Stream opened successfully.
+				// TTFT check: verify the stream actually produces events.
+				if c.ttftTimeout > 0 {
+					firstEvent, ttftErr := parser.NextWithTimeout(c.ttftTimeout)
+					if ttftErr != nil {
+						// Stream opened but hung — treat as failure.
+						parser.Close()
+						if hasCB {
+							breaker.RecordFailure()
+						}
+						failure := FailureRecord{
+							ProviderID: pid,
+							ModelID:    mid,
+							Error:      ttftErr,
+							Reason:     "ttft_timeout",
+							Duration:   time.Since(start),
+							Timestamp:  time.Now(),
+						}
+						failures = append(failures, failure)
+						c.logger.Warn("stream hung (TTFT timeout)",
+							"provider", pid,
+							"model", mid,
+							"timeout", c.ttftTimeout,
+						)
+						continue // try next provider
+					}
+
+					// First event received — stream is alive.
+					// Wrap the parser so the first event isn't lost.
+					wrappedParser := stream.NewPrefixedParser(parser, firstEvent)
+					if hasCB {
+						breaker.RecordSuccess()
+					}
+					c.logger.Info("stream opened (TTFT verified)",
+						"provider", pid,
+						"model", mid,
+						"duration", time.Since(start),
+					)
+					return FallbackResult{
+						Success:  true,
+						Provider: pid,
+						ModelID:  mid,
+						Stream:   wrappedParser,
+						Failures: failures,
+					}
+				}
+
+				// No TTFT timeout configured — original behavior.
 				if hasCB {
 					breaker.RecordSuccess()
 				}
