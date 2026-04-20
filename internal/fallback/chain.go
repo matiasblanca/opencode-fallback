@@ -167,6 +167,16 @@ func (c *Chain) Execute(ctx context.Context, req *provider.ProxyRequest) Fallbac
 			return FallbackResult{Success: false, Failures: failures}
 		}
 
+		// Context overflow is fatal for the ENTIRE chain — the same oversized
+		// prompt will fail on every provider, so there's no point falling back.
+		if lastFailure != nil && lastFailure.Reason == "context_overflow" {
+			c.logger.Info("aborting chain: context overflow is fatal for all providers",
+				"provider", pid,
+				"model", mid,
+			)
+			return FallbackResult{Success: false, Failures: failures}
+		}
+
 		reason := "unknown"
 		if lastFailure != nil {
 			reason = lastFailure.Reason

@@ -379,15 +379,32 @@ Cualquier API que acepte el formato OpenAI `/v1/chat/completions` funciona — s
 ## Desarrollo
 
 ```bash
-go test ./...          # 647 tests
-go test -cover ./...   # Tests con coverage
-go vet ./...           # Static analysis
-go build ./...         # Compilar todo
+go test ./...                        # Unit + integration tests (647 tests)
+go test -tags e2e ./internal/proxy/  # E2E tests (12 tests, full proxy stack)
+go test -cover ./...                 # Tests con coverage
+go vet ./...                         # Static analysis
+go build ./...                       # Compilar todo
 ```
+
+### E2E Tests
+
+Los E2E tests (`internal/proxy/e2e_full_test.go`) validan el stack completo: un proxy real escuchando en un puerto random, requests HTTP reales, y mock backends con `httptest.Server`. No requieren API keys ni internet.
+
+```bash
+go test -tags e2e -v -count=1 ./internal/proxy/ -run TestE2E
+```
+
+Cubren: health endpoint, non-streaming/streaming happy path, fallback por server error y connection refused, circuit breaker trips, rate limit cooldown, overflow blocks fallback, streaming fallback, health scoring reorder, abort safety, y quota exhaustion.
 
 ~7400 líneas de código de producción, ~9700 líneas de tests.
 
 ## Changelog
+
+### v0.9.1
+
+- **E2E test suite** — 12 tests de integración completa que validan el stack entero: proxy real en puerto random + mock backends + requests HTTP reales. Build tag `e2e` (no corren en `go test ./...`).
+- **Bugfix: overflow ahora aborta la cadena** — Context overflow (`prompt is too long`) abortaba el retry-same-provider pero seguía fallando a otros providers inútilmente (el mismo prompt oversize falla en todos). Ahora aborta toda la cadena de fallback inmediatamente.
+- **CI workflow** — GitHub Actions corre E2E tests con `-tags e2e` en cada push.
 
 ### v0.9.0
 
